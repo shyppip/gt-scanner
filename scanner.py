@@ -630,14 +630,15 @@ def run_trend():
 
 
 def run_auto():
-    """매시간 실행: 한 통으로 묶어서 보냄 (UTC 기준으로 할 일 결정)"""
+    """30분마다 실행: 한 통으로 묶어서 보냄 (UTC 기준으로 할 일 결정)"""
     started = datetime.now(KST)
-    hour = datetime.now(timezone.utc).hour
-    if hour in (0, 15):            # KST 09시·00시
+    now = datetime.now(timezone.utc)
+    hour, main_slot = now.hour, now.minute < 30     # 매시 03분 = 본 검사, 33분 = 15분봉만
+    if main_slot and hour in (0, 15):              # KST 09시·00시
         run_report()
         return
     lines = [f"🕐 <b>{started:%m/%d %H:%M}</b>"]
-    if hour % 4 == 0:              # KST 13·17·21·01·05시: 4시간봉 검사도 함께
+    if main_slot and hour % 4 == 0:                # KST 13·17·21·01·05시: 4시간봉 검사도 함께
         sl, _ = scan_lines()
         lines += sl
     tl, checked = trend_lines()
