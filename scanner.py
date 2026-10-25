@@ -51,7 +51,7 @@ UPBIT_UNIT = {"1m": "minutes/1", "15m": "minutes/15", "1h": "minutes/60", "4h": 
 INTERVAL_SEC = {"1m": 60, "15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}
 TV_TF = {"4h": "240", "1h": "60", "15m": "15", "1d": "D", "1m": "1"}
 LABEL = {"upbit": "업비트", "binance": "바이낸스"}
-EX_ICON = {"upbit": "🔷", "binance": "🔶"}   # 거래소 표시: 🔷 업비트(파랑) · 🔶 바이낸스(노랑)
+EX_ICON = {"upbit": "[업]", "binance": "[바]"}   # 거래소 표시: [업] 업비트 · [바] 바이낸스
 
 STABLES = {"USDC", "FDUSD", "TUSD", "BUSD", "DAI", "USDP", "EUR", "AEUR", "EURI", "USDE", "XUSD", "BFUSD", "PAXG", "USD1", "RLUSD"}
 
@@ -315,7 +315,7 @@ def coin_line(h, iv, mark="▲"):
     ex = EX_ICON[h["ex"]]
     code = h["code"].replace("KRW-", "").replace("USDT", "")
     name = "" if h["name"] == code else " " + html.escape(h["name"])
-    return f"{mark}{ex} <a href=\"{tv_link(h['ex'], h['code'], iv)}\">{html.escape(code)}</a>{name}{warn}"
+    return f"{mark} {ex} <a href=\"{tv_link(h['ex'], h['code'], iv)}\">{html.escape(code)}</a>{name}{warn}"
 
 
 def lights_txt(lights):
@@ -517,7 +517,7 @@ def near_block(results, iv):
             code = h["code"].replace("KRW-", "").replace("USDT", "")
             items.append(f"<a href=\"{tv_link(h['ex'], h['code'], iv)}\">{html.escape(code)}</a>({bars}봉)")
         more = f" 외 {len(near) - NEAR_MAX}" if len(near) > NEAR_MAX else ""
-        lines.append(f"⏳{EX_ICON[r['ex']]} 임박: " + "·".join(items) + more)
+        lines.append(f"⏳ {EX_ICON[r['ex']]} 임박: " + "·".join(items) + more)
     return lines or ["⏳ 임박 코인 없음"]
 
 
