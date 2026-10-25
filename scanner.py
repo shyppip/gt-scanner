@@ -38,6 +38,8 @@ DRY_RUN = os.environ.get("GT_DRY_RUN", "false").lower() == "true"         # 텔�
 NEAR_GAP = float(os.environ.get("GT_NEAR_GAP", "1.5"))     # 임박 목록: 50선이 200선 아래 몇 % 이내
 NEAR_BARS = int(os.environ.get("GT_NEAR_BARS", "12"))      # 임박 목록: 지금 속도면 몇 봉 안에 닿을지
 NEAR_MAX = int(os.environ.get("GT_NEAR_MAX", "10"))        # 임박 목록: 거래소별 최대 개수
+TREND_TOP = int(os.environ.get("GT_TREND_TOP", "120"))     # 15분봉 추세전환 검사: 거래대금 상위 몇 개까지 (거래소별)
+TREND_BARS = int(os.environ.get("GT_TREND_BARS", "5"))     # 15분봉 추세전환: 최근 몇 봉 안의 교차를 볼지 (5봉 = 75분)
 STRONG = int(os.environ.get("GT_STRONG", "80"))            # 신호 강도 🟢 기준 (% 이상)
 MIDDLE = int(os.environ.get("GT_MIDDLE", "50"))            # 신호 강도 🟡 기준 (% 이상), 그 아래는 🔴
 
@@ -212,11 +214,61 @@ def binance_markets():
 
 
 def binance_closes(symbol, iv):
-    rows = bn_get("/api/v3/klines", {"symbol": symbol, "interval": iv, "limit": NEED + 5})
+    rows = bn_get("/api/v3/klines", {"symbol": symbol, "interval": iv, "limit": NEED + 12})
     now_ms = time.time() * 1000
     closed = [(int(r[0]), float(r[4]), float(r[5])) for r in rows if int(r[6]) < now_ms]  # r[6] = 마감 시각
     return ([c for _, c, _ in closed], [v for _, _, v in closed],
             datetime.fromtimestamp(closed[-1][0] / 1000, timezone.utc) if closed else None)
+
+
+def upbit_top(markets, n):
+    """업비트 원화마켓 24시간 거래대금 상위 n개"""
+    codes = [m["code"] for m in markets]
+    vol = {}
+    for i in range(0, len(codes), 100):
+        for t in get("https://api.upbit.com/v1/ticker", {"markets": ",".join(codes[i:i + 100])}) or []:
+            vol[t["market"]] = float(t.get("acc_trade_price_24h") or 0)
+    return sorted(markets, key=lambda m: -vol.get(m["code"], 0))[:n]
+
+
+def binance_top(markets, n):
+    """바이낸스 USDT 마켓 24시간 거래대금(USDT) 상위 n개"""
+    vol = {t["symbol"]: float(t.get("quoteVolume") or 0) for t in bn_get("/api/v3/ticker/24hr") or []}
+    return sorted(markets, key=lambda m: -vol.get(m["code"], 0))[:n]
+
+
+def trend_state(a):
+    """4시간봉 큰 추세 판정: 상승 추세 / 하락 추세 / 횡보 유지"""
+    if a is None:
+        return "⚪", "데이터 부족"
+    if a["fast"] > a["slow"] and a["gap"] >= 1.0 and a.get("fast_up"):
+        return "📈", "상승 추세"
+    if a["fast"] < a["slow"] and a["gap"] <= -1.0 and not a.get("fast_up"):
+        return "📉", "하락 추세"
+    return "➖", "횡보 유지"
+
+
+def recent_cross(closes, vols, lookback):
+    """최근 lookback봉 안에서 일어난 마지막 50/200 교차. (방향, 몇 봉 전, 교차봉 거래량 배수) 또는 None"""
+    L = len(closes)
+    if L < NEED + lookback:
+        return None
+    for back in range(0, lookback):
+        end = L - back
+        f_now, s_now = sma(closes, FAST, end), sma(closes, SLOW, end)
+        f_prev, s_prev = sma(closes, FAST, end - 1), sma(closes, SLOW, end - 1)
+        if f_prev <= s_prev and f_now > s_now:
+            d = "up"
+        elif f_prev >= s_prev and f_now < s_now:
+            d = "down"
+        else:
+            continue
+        # 교차 뒤 지금까지 같은 쪽을 유지하는지
+        held = (sma(closes, FAST, L) > sma(closes, SLOW, L)) == (d == "up")
+        base = sum(vols[end - 21:end - 1]) / 20 if vols and end >= 21 else 0
+        vx = vols[end - 1] / base if base > 0 else None
+        return {"dir": d, "back": back, "held": held, "vol_x": vx}
+    return None
 
 
 # ───────── 텔레그램 ─────────
@@ -387,7 +439,7 @@ def strength(h, iv, lights):
     """신호 강도 (100점 만점 %)
     일봉 추세 30 · 다른 봉 추세 20 · 거래량 20 · RSI 20 · 50선 상승+가격이 200선 위 10"""
     score, why = 0, []
-    big = "1d" if iv != "1d" else "4h"                      # 더 큰 봉
+    big = {"15m": "4h", "1h": "1d", "4h": "1d", "1d": "4h"}[iv]   # 더 큰 봉
     small = [tf for tf in TF_ORDER if tf not in (iv, big)][0]  # 나머지 봉
     pts = {"🟢": 1.0, "🟡": 0.5, "🔴": 0.0, "⚪": 0.5}
     name = {"1d": "일봉", "4h": "4h", "1h": "1h"}
@@ -505,6 +557,110 @@ def run_scan():
         log("새 신호 없음 — 텔레그램 안 보냄")
 
 
+def run_trend():
+    """매시간: 거래대금 상위 코인의 15분봉 추세전환 + 4시간봉 큰 추세 판정"""
+    started = datetime.now(KST)
+    exs = [e.strip() for e in EXCHANGES if e.strip()]
+    hits, checked, fails = [], 0, []
+    for ex in exs:
+        try:
+            markets = upbit_markets() if ex == "upbit" else binance_markets()
+            top = upbit_top(markets, TREND_TOP) if ex == "upbit" else binance_top(markets, TREND_TOP)
+        except Exception as e:
+            log(f"{ex} 목록 실패: {e}")
+            fails.append(f"⚠️ {LABEL[ex]} 목록을 못 받았어요: {html.escape(str(e)[:120])}")
+            continue
+        fetch = upbit_closes if ex == "upbit" else binance_closes
+        log(f"{LABEL[ex]} 15m 추세전환: 상위 {len(top)}개 검사")
+
+        def one(m):
+            try:
+                c, v, bar = fetch(m["code"], "15m")
+                return m, recent_cross(c, v, TREND_BARS), analyze(c, v), bar, None
+            except Exception as e:
+                return m, None, None, None, e
+
+        with ThreadPoolExecutor(max_workers=4 if ex == "upbit" else 8) as pool:
+            for m, cr, a15, bar, err in pool.map(one, top):
+                if err is not None or a15 is None:
+                    continue
+                checked += 1
+                if not cr or not cr["held"]:
+                    continue
+                # 거짓 신호 줄이기: 교차 뒤 1봉 이상 유지했거나, 교차봉 거래량이 평소 1.5배 이상
+                if cr["back"] < 1 and not (cr["vol_x"] and cr["vol_x"] >= 1.5):
+                    continue
+                h = {**m, **a15, "ex": ex, "krw": ex == "upbit", "cross": cr, "bar15": bar}
+                hits.append(h)
+                log(f"  🔄 15m {cr['dir']} {m['code']} ({cr['back']}봉 전)")
+    # 큰 봉 상태 + 신호등
+    for h in hits:
+        fetch = upbit_closes if h["ex"] == "upbit" else binance_closes
+        lights, a4 = {}, None
+        for tf in TF_ORDER:
+            try:
+                c, v, _ = fetch(h["code"], tf)
+                a = analyze(c, v)
+            except Exception:
+                a = None
+            lights[tf] = light(a)
+            if tf == "4h":
+                a4 = a
+        h["lights"] = lights
+        h["state4"] = trend_state(a4)
+        h["strength"] = strength(h, "15m", lights) if h["cross"]["dir"] == "up" else None
+
+    if not hits and not fails:
+        log("15m 추세전환 없음 — 텔레그램 안 보냄")
+        return
+    lines = [f"🔔 <b>추세전환 감지 (15분봉)</b>  <i>최근 {TREND_BARS * 15}분 · 거래대금 상위 {TREND_TOP}개 기준</i>"]
+    for kind, head in (("up", "🔄 상승 전환 (50선이 200선 위로)"), ("down", "🔻 하락 전환 (50선이 200선 아래로)")):
+        group = [h for h in hits if h["cross"]["dir"] == kind]
+        if not group:
+            continue
+        group.sort(key=lambda h: -(h["strength"][1] if h.get("strength") else 0))
+        lines.append("")
+        lines.append(f"<b>{head}</b>")
+        for h in group:
+            cr = h["cross"]
+            icon4, name4 = h["state4"]
+            if kind == "up":
+                short = {"상승 추세": "추세 동조 · 상승 지속 가능", "횡보 유지": "단기 상승 가능",
+                         "하락 추세": "단기 반등 가능 (큰 추세는 하락)", "데이터 부족": "판단 보류"}[name4]
+            else:
+                short = {"상승 추세": "단기 조정 가능 (큰 추세는 상승)", "횡보 유지": "단기 하락 가능",
+                         "하락 추세": "추세 동조 · 하락 지속 가능", "데이터 부족": "판단 보류"}[name4]
+            when = "방금" if cr["back"] == 0 else f"{cr['back']}봉 전"
+            lines.append(coin_line(h, "15m"))
+            lines.append(f"   15분봉: {'🔄 상승 전환' if kind == 'up' else '🔻 하락 전환'} ({when}, {cr['back'] + 1}봉 유지)")
+            lines.append(f"   4시간봉: {icon4} {name4} → {short}")
+            tl = "  ".join(f"{k} {v}" for k, v in h["lights"].items())
+            extra = [tl]
+            if cr["vol_x"] is not None:
+                extra.append(f"거래량 {cr['vol_x']:.1f}배")
+            if h.get("rsi") is not None:
+                extra.append(f"RSI {h['rsi']:.0f}")
+            if h.get("strength"):
+                si, sp, _ = h["strength"]
+                extra.append(f"신호 강도 {si} {sp}%")
+            lines.append("   " + " · ".join(extra))
+    lines.append("")
+    lines.append("<i>신호등: 🟢 50선이 200선 위 · 🟡 교차 임박 · 🔴 아래 · ⚪ 데이터 부족 | 15분봉은 가짜 교차가 잦아요. 교차 뒤 1봉 유지 또는 거래량 1.5배 이상만 알려요.</i>")
+    lines += fails
+    lines.append(f"<i>{started:%m/%d %H:%M} KST · {checked}개 검사 · 투자 권유가 아닌 신호 알림입니다.</i>")
+    tg_send("\n".join(lines))
+
+
+def run_auto():
+    """매시간 실행: 시각에 따라 할 일을 고름 (UTC 기준)"""
+    hour = datetime.now(timezone.utc).hour
+    if hour in (0, 15):            # KST 09시·00시
+        run_report()
+    elif hour % 4 == 0:            # KST 13·17·21·01·05시
+        run_scan()
+    run_trend()
+
+
 def run_report():
     """KST 00시·09시 정기 리포트: 항상 보냄"""
     started = datetime.now(KST)
@@ -548,5 +704,9 @@ if __name__ == "__main__":
         tg_send("✅ Golden Trend 알림 봇 연결 테스트 성공! 이제 신호가 뜨면 여기로 알려드릴게요.")
     elif mode == "report":
         run_report()
+    elif mode == "trend":
+        run_trend()
+    elif mode == "auto":
+        run_auto()
     else:
         run_scan()
