@@ -2,12 +2,16 @@ name: Golden Trend 스캔
 
 on:
   schedule:
-    # 4시간봉 마감 직후 (UTC 00·04·08·12·16·20시 = KST 09·13·17·21·01·05시) + 3분 여유
-    - cron: "3 0,4,8,12,16,20 * * *"
+    # 정기 리포트: KST 09:03 (4시간봉 신호 + 1시간봉 신호 + 임박 목록 + 요약)
+    - cron: "3 0 * * *"
+    # 정기 리포트: KST 00:03 (1시간봉 신호 + 임박 목록 + 요약)
+    - cron: "3 15 * * *"
+    # 4시간봉 검사: KST 13·17·21·01·05시 3분 (새 신호 있을 때만 알림)
+    - cron: "3 4,8,12,16,20 * * *"
   workflow_dispatch:        # Actions 화면의 'Run workflow' 버튼으로 바로 실행
     inputs:
       mode:
-        description: "scan = 평소 검사 / test = 텔레그램 연결 테스트"
+        description: "scan = 4시간봉 검사 / report = 정기 리포트 / test = 텔레그램 연결 테스트"
         default: "scan"
 
 permissions:
@@ -32,18 +36,17 @@ jobs:
           GT_INTERVAL: "4h"
           GT_SELL_ALERTS: ${{ vars.GT_SELL_ALERTS || 'false' }}
           GT_HEARTBEAT: ${{ vars.GT_HEARTBEAT || 'false' }}
+          SCHEDULE: ${{ github.event.schedule }}
+          MODE_INPUT: ${{ github.event.inputs.mode }}
         run: |
-          if [ "${{ github.event.inputs.mode }}" = "test" ]; then
-            python scanner.py test
-          else
-            python scanner.py
-          fi
+          MODE="${MODE_INPUT:-scan}"
+          if [ "$SCHEDULE" = "3 0 * * *" ] || [ "$SCHEDULE" = "3 15 * * *" ]; then MODE=report; fi
+          if [ "$SCHEDULE" = "3 4,8,12,16,20 * * *" ]; then MODE=scan; fi
+          echo "실행 모드: $MODE"
+          python scanner.py "$MODE"
       # GitHub은 오래 변화가 없는 저장소의 예약 실행을 멈출 수 있어서, 매일 한 번 다시 켜둠
       - name: 예약 실행 유지
-        if: github.event_name == 'schedule'
+        if: github.event.schedule == '3 0 * * *'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          if [ "$(date -u +%H)" = "00" ]; then
-            gh api -X PUT "repos/${{ github.repository }}/actions/workflows/scan.yml/enable" || true
-          fi
+        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/scan.yml/enable" || true
