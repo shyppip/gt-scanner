@@ -11,7 +11,7 @@ on:
   workflow_dispatch:        # Actions 화면의 'Run workflow' 버튼으로 바로 실행
     inputs:
       mode:
-        description: "scan = 4시간봉 검사 / report = 정기 리포트 / test = 텔레그램 연결 테스트"
+        description: "scan = 4시간봉 검사 / report = 정기 리포트 / gt = 전략 점검 / test = 텔레그램 연결 테스트"
         default: "scan"
 
 permissions:
@@ -43,7 +43,9 @@ jobs:
           if [ "$SCHEDULE" = "3 0 * * *" ] || [ "$SCHEDULE" = "3 15 * * *" ]; then MODE=report; fi
           if [ "$SCHEDULE" = "3 4,8,12,16,20 * * *" ]; then MODE=scan; fi
           echo "실행 모드: $MODE"
-          python scanner.py "$MODE"
+          if [ "$MODE" != "gt" ]; then python scanner.py "$MODE"; fi
+          # Golden Trend 전략 일일 점검: 오전 9시 리포트 때 한 번 (또는 수동 gt)
+          if [ "$SCHEDULE" = "3 0 * * *" ] || [ "$MODE" = "gt" ]; then python gt_daily.py; fi
       # GitHub은 오래 변화가 없는 저장소의 예약 실행을 멈출 수 있어서, 매일 한 번 다시 켜둠
       - name: 예약 실행 유지
         if: github.event.schedule == '3 0 * * *'
