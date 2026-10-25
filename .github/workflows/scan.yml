@@ -1,0 +1,49 @@
+name: Golden Trend 스캔
+
+on:
+  schedule:
+    # 4시간봉 마감 직후 (UTC 00·04·08·12·16·20시 = KST 09·13·17·21·01·05시) + 3분 여유
+    - cron: "3 0,4,8,12,16,20 * * *"
+  workflow_dispatch:        # Actions 화면의 'Run workflow' 버튼으로 바로 실행
+    inputs:
+      mode:
+        description: "scan = 평소 검사 / test = 텔레그램 연결 테스트"
+        default: "scan"
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    concurrency: gt-scan
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install requests
+      - name: 스캔 실행
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GT_INTERVAL: "4h"
+          GT_SELL_ALERTS: ${{ vars.GT_SELL_ALERTS || 'false' }}
+          GT_HEARTBEAT: ${{ vars.GT_HEARTBEAT || 'false' }}
+        run: |
+          if [ "${{ github.event.inputs.mode }}" = "test" ]; then
+            python scanner.py test
+          else
+            python scanner.py
+          fi
+      # GitHub은 오래 변화가 없는 저장소의 예약 실행을 멈출 수 있어서, 매일 한 번 다시 켜둠
+      - name: 예약 실행 유지
+        if: github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$(date -u +%H)" = "00" ]; then
+            gh api -X PUT "repos/${{ github.repository }}/actions/workflows/scan.yml/enable" || true
+          fi
