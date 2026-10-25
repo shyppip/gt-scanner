@@ -38,6 +38,8 @@ DRY_RUN = os.environ.get("GT_DRY_RUN", "false").lower() == "true"         # 텔�
 NEAR_GAP = float(os.environ.get("GT_NEAR_GAP", "1.5"))     # 임박 목록: 50선이 200선 아래 몇 % 이내
 NEAR_BARS = int(os.environ.get("GT_NEAR_BARS", "12"))      # 임박 목록: 지금 속도면 몇 봉 안에 닿을지
 NEAR_MAX = int(os.environ.get("GT_NEAR_MAX", "10"))        # 임박 목록: 거래소별 최대 개수
+STRONG = int(os.environ.get("GT_STRONG", "80"))            # 신호 강도 🟢 기준 (% 이상)
+MIDDLE = int(os.environ.get("GT_MIDDLE", "50"))            # 신호 강도 🟡 기준 (% 이상), 그 아래는 🔴
 
 KST = timezone(timedelta(hours=9))
 UA = {"User-Agent": "golden-trend-scanner/1.1"}
@@ -129,7 +131,7 @@ def analyze(closes, vols=None):
         base = sum(vols[-21:-1]) / 20
         vol_x = vols[-1] / base if base > 0 else None
     return {"sig": sig, "fast": f_now, "slow": s_now, "close": closes[-1], "gap": gap, "eta": eta,
-            "rsi": rsi(closes[-150:]), "vol_x": vol_x}
+            "rsi": rsi(closes[-150:]), "vol_x": vol_x, "fast_up": f_now > f_prev}
 
 
 def light(a):
@@ -345,8 +347,8 @@ def signal_block(results, iv, title):
                 extra.append(f"RSI {h['rsi']:.0f}")
             lines.append(f"   종가 {fmt_price(h['close'], h['krw'])} · " + " · ".join(extra or [f"간격 {h['gap']:+.2f}%"]))
             if h.get("strength") and kind == "buy":
-                icon, word, why = h["strength"]
-                lines.append(f"   → 신호 강도 {icon} {word}" + (f" ({', '.join(why)})" if why else ""))
+                icon, pct, why = h["strength"]
+                lines.append(f"   → 신호 강도 {icon} {pct}%" + (f" ({', '.join(why)})" if why else ""))
     lines.append("")
     return lines, len([h for h in hits if h["sig"] == "buy"])
 
@@ -382,37 +384,55 @@ def enrich(results, iv, known):
 
 
 def strength(h, iv, lights):
-    """신호 강도: 다른 봉 추세·거래량·RSI를 점수로 묶음"""
+    """신호 강도 (100점 만점 %)
+    일봉 추세 30 · 다른 봉 추세 20 · 거래량 20 · RSI 20 · 50선 상승+가격이 200선 위 10"""
     score, why = 0, []
-    for tf in TF_ORDER:
-        if tf == iv:
-            continue
-        if lights[tf] == "🟢":
-            score += 2 if tf == "1d" else 1
+    big = "1d" if iv != "1d" else "4h"                      # 더 큰 봉
+    small = [tf for tf in TF_ORDER if tf not in (iv, big)][0]  # 나머지 봉
+    pts = {"🟢": 1.0, "🟡": 0.5, "🔴": 0.0, "⚪": 0.5}
+    name = {"1d": "일봉", "4h": "4h", "1h": "1h"}
+    score += 30 * pts[lights[big]]
+    score += 20 * pts[lights[small]]
+    for tf in (big, small):
+        if lights[tf] == "🔴":
+            why.append(f"{name[tf]} 아직 하락")
         elif lights[tf] == "🟡":
-            score += 1 if tf == "1d" else 0
-            why.append(f"{tf} 교차 직전")
-        elif lights[tf] == "🔴":
-            why.append(f"{'일봉' if tf == '1d' else tf} 아직 하락")
+            why.append(f"{name[tf]} 교차 직전")
     vx = h.get("vol_x")
-    if vx is not None:
-        if vx >= 1.5:
-            score += 1
-        elif vx < 0.8:
-            score -= 1
-            why.append(f"거래량 약함({vx:.1f}배)")
+    if vx is None:
+        score += 10
+    elif vx >= 2:
+        score += 20
+    elif vx >= 1.5:
+        score += 15
+    elif vx >= 1:
+        score += 10
+    elif vx >= 0.8:
+        score += 5
+        why.append(f"거래량 평소 수준({vx:.1f}배)")
+    else:
+        why.append(f"거래량 약함({vx:.1f}배)")
     r = h.get("rsi")
-    if r is not None:
-        if r >= 75:
-            score -= 1
-            why.append(f"RSI 과열({r:.0f})")
-        elif 50 <= r < 75:
-            score += 1
-    if score >= 4:
-        return "🟢", "강함", why
-    if score >= 2:
-        return "🟡", "보통", why
-    return "🔴", "약함", why
+    if r is None:
+        score += 10
+    elif 50 <= r < 70:
+        score += 20
+    elif 70 <= r < 75 or 45 <= r < 50:
+        score += 10
+    elif r >= 75:
+        why.append(f"RSI 과열({r:.0f})")
+    else:
+        score += 5
+        why.append(f"RSI 약함({r:.0f})")
+    if h.get("fast_up"):
+        score += 5
+    if h["close"] > h["slow"]:
+        score += 5
+    else:
+        why.append("가격이 200선 아래")
+    pct = round(score)
+    icon = "🟢" if pct >= STRONG else ("🟡" if pct >= MIDDLE else "🔴")
+    return icon, pct, why
 
 
 def market_light(res4):
@@ -479,7 +499,7 @@ def run_scan():
     if sig_lines or fails or HEARTBEAT:
         lines = sig_lines or [f"✅ Golden Trend 검사 완료 ({INTERVAL}봉) — 새 신호 없음", ""]
         ml = market_light(res) if INTERVAL == "4h" else None
-        legend = ["<i>신호등: 🟢 50선이 200선 위 · 🟡 교차 임박 · 🔴 아래 · ⚪ 데이터 부족</i>"] if sig_lines else []
+        legend = [f"<i>신호등: 🟢 50선이 200선 위 · 🟡 교차 임박 · 🔴 아래 · ⚪ 데이터 부족 | 신호 강도: 🟢 {STRONG}%↑ · 🟡 {MIDDLE}~{STRONG - 1}% · 🔴 {MIDDLE}% 미만</i>"] if sig_lines else []
         tg_send("\n".join(lines + ([ml] if ml else []) + legend + fails + [summary_line(started, res)]))
     else:
         log("새 신호 없음 — 텔레그램 안 보냄")
@@ -515,7 +535,7 @@ def run_report():
     lines += near_block(res4, "4h")
 
     # ④ 요약
-    lines.append("<i>신호등: 🟢 50선이 200선 위 · 🟡 교차 임박 · 🔴 아래 · ⚪ 데이터 부족</i>")
+    lines.append(f"<i>신호등: 🟢 50선이 200선 위 · 🟡 교차 임박 · 🔴 아래 · ⚪ 데이터 부족 | 신호 강도: 🟢 {STRONG}%↑ · 🟡 {MIDDLE}~{STRONG - 1}% · 🔴 {MIDDLE}% 미만</i>")
     lines.append(f"새 매수 신호: 4시간봉 {n4 if fresh4 else '-'}개 · 1시간봉 {n1}개")
     lines += fail_lines(res4 + res1)
     lines.append(summary_line(started, res4))
