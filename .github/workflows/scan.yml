@@ -2,17 +2,15 @@ name: Golden Trend 스캔
 
 on:
   schedule:
-    # 정기 리포트: KST 09:03 (4시간봉 신호 + 1시간봉 신호 + 임박 목록 + 요약)
-    - cron: "3 0 * * *"
-    # 정기 리포트: KST 00:03 (1시간봉 신호 + 임박 목록 + 요약)
-    - cron: "3 15 * * *"
-    # 4시간봉 검사: KST 13·17·21·01·05시 3분 (새 신호 있을 때만 알림)
-    - cron: "3 4,8,12,16,20 * * *"
+    # 매시간 3분: 15분봉 추세전환 검사 (항상)
+    #   + KST 09:03·00:03 = 정기 리포트
+    #   + KST 13·17·21·01·05시 = 4시간봉 검사
+    - cron: "3 * * * *"
   workflow_dispatch:        # Actions 화면의 'Run workflow' 버튼으로 바로 실행
     inputs:
       mode:
-        description: "scan = 4시간봉 검사 / report = 정기 리포트 / gt = 전략 점검 / test = 텔레그램 연결 테스트"
-        default: "scan"
+        description: "auto = 시각에 맞게 / scan = 4시간봉 검사 / report = 정기 리포트 / trend = 15분봉 추세전환 / test = 텔레그램 연결 테스트"
+        default: "auto"
 
 permissions:
   contents: read
@@ -36,19 +34,18 @@ jobs:
           GT_INTERVAL: "4h"
           GT_SELL_ALERTS: ${{ vars.GT_SELL_ALERTS || 'false' }}
           GT_HEARTBEAT: ${{ vars.GT_HEARTBEAT || 'false' }}
-          SCHEDULE: ${{ github.event.schedule }}
+          GT_TREND_TOP: ${{ vars.GT_TREND_TOP || '120' }}
           MODE_INPUT: ${{ github.event.inputs.mode }}
         run: |
-          MODE="${MODE_INPUT:-scan}"
-          if [ "$SCHEDULE" = "3 0 * * *" ] || [ "$SCHEDULE" = "3 15 * * *" ]; then MODE=report; fi
-          if [ "$SCHEDULE" = "3 4,8,12,16,20 * * *" ]; then MODE=scan; fi
+          MODE="${MODE_INPUT:-auto}"
           echo "실행 모드: $MODE"
-          if [ "$MODE" != "gt" ]; then python scanner.py "$MODE"; fi
-          # Golden Trend 전략 일일 점검: 오전 9시 리포트 때 한 번 (또는 수동 gt)
-          if [ "$SCHEDULE" = "3 0 * * *" ] || [ "$MODE" = "gt" ]; then python gt_daily.py; fi
+          python scanner.py "$MODE"
       # GitHub은 오래 변화가 없는 저장소의 예약 실행을 멈출 수 있어서, 매일 한 번 다시 켜둠
       - name: 예약 실행 유지
-        if: github.event.schedule == '3 0 * * *'
+        if: github.event_name == 'schedule'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/scan.yml/enable" || true
+        run: |
+          if [ "$(date -u +%H)" = "00" ]; then
+            gh api -X PUT "repos/${{ github.repository }}/actions/workflows/scan.yml/enable" || true
+          fi
