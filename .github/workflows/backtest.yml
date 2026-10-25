@@ -1,0 +1,26 @@
+name: Golden Trend 백테스트
+
+on:
+  workflow_dispatch:        # Actions 화면의 'Run workflow' 버튼으로만 실행 (예약 없음)
+    inputs:
+      days:
+        description: "최근 며칠 (기본 365)"
+        default: "365"
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 -m pip install -q requests
+      - name: 백테스트 실행
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GT_BT_DAYS: ${{ github.event.inputs.days }}
+        run: python3 backtest.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: backtest-csv
+          path: backtest_*.csv
