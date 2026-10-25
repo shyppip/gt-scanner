@@ -4,15 +4,20 @@ Golden Trend 매수신호 스캐너 (업비트 원화마켓 + 바이낸스 USDT 
 규칙 (트레이딩뷰 Golden Trend 지표와 동일)
 - 50봉 단순이동평균(SMA)이 200봉 SMA를 아래에서 위로 돌파 = 매수 신호
 - 확정된 봉(마감된 봉)에서만 판단. 진행 중인 봉은 쓰지 않음
-- 기본 4시간봉
 
-실행할 때마다 '가장 최근에 마감된 봉'에서 막 교차가 일어난 코인만 텔레그램으로 보냄.
-4시간마다(봉 마감 직후) 한 번씩 돌리면 같은 신호가 두 번 오지 않음.
+실행 방법
+- python scanner.py          → 4시간봉 검사. 막 마감된 봉에서 새 신호가 난 코인만 알림 (4시간마다)
+- python scanner.py report   → 정기 리포트 (KST 00시·09시)
+                               ① 4시간봉 새 신호(09시처럼 4시간봉이 막 마감된 때만)
+                               ② 1시간봉 새 신호
+                               ③ 4시간봉 골든크로스 임박 코인 목록
+                               ④ 검사 요약 (신호가 없어도 항상 보냄)
+- python scanner.py test     → 텔레그램 연결 테스트
 """
 import os
 import sys
+import math
 import time
-import json
 import html
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -23,20 +28,25 @@ import requests
 # ───────── 설정 (환경변수로 바꿀 수 있음) ─────────
 TG_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TG_CHAT = os.environ.get("TELEGRAM_CHAT_ID", "")
-INTERVAL = os.environ.get("GT_INTERVAL", "4h")          # 4h / 1h / 15m / 1d
+INTERVAL = os.environ.get("GT_INTERVAL", "4h")          # 기본 검사 봉: 4h / 1h / 15m / 1d
 FAST = int(os.environ.get("GT_FAST", "50"))
 SLOW = int(os.environ.get("GT_SLOW", "200"))
 SELL_ALERTS = os.environ.get("GT_SELL_ALERTS", "false").lower() == "true"  # 데드크로스(청산)도 받을지
 EXCHANGES = os.environ.get("GT_EXCHANGES", "upbit,binance").split(",")
-HEARTBEAT = os.environ.get("GT_HEARTBEAT", "false").lower() == "true"     # 신호 없어도 '검사 완료' 보내기
+HEARTBEAT = os.environ.get("GT_HEARTBEAT", "false").lower() == "true"     # 4시간 검사도 신호 없을 때 '검사 완료' 보내기
 DRY_RUN = os.environ.get("GT_DRY_RUN", "false").lower() == "true"         # 텔레그램 대신 화면에만 출력
+NEAR_GAP = float(os.environ.get("GT_NEAR_GAP", "1.5"))     # 임박 목록: 50선이 200선 아래 몇 % 이내
+NEAR_BARS = int(os.environ.get("GT_NEAR_BARS", "12"))      # 임박 목록: 지금 속도면 몇 봉 안에 닿을지
+NEAR_MAX = int(os.environ.get("GT_NEAR_MAX", "10"))        # 임박 목록: 거래소별 최대 개수
 
 KST = timezone(timedelta(hours=9))
-UA = {"User-Agent": "golden-trend-scanner/1.0"}
+UA = {"User-Agent": "golden-trend-scanner/1.1"}
 NEED = SLOW + 1          # 교차 판단에 필요한 마감봉 수 (직전봉 SMA200 + 현재봉 SMA200)
 
 UPBIT_UNIT = {"1m": "minutes/1", "15m": "minutes/15", "1h": "minutes/60", "4h": "minutes/240", "1d": "days"}
 INTERVAL_SEC = {"1m": 60, "15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}
+TV_TF = {"4h": "240", "1h": "60", "15m": "15", "1d": "D", "1m": "1"}
+LABEL = {"upbit": "업비트", "binance": "바이낸스"}
 
 STABLES = {"USDC", "FDUSD", "TUSD", "BUSD", "DAI", "USDP", "EUR", "AEUR", "EURI", "USDE", "XUSD", "BFUSD", "PAXG", "USD1", "RLUSD"}
 
@@ -61,11 +71,11 @@ class RateLimit:
             time.sleep(t - now)
 
 
-LIMITS = {"api.upbit.com": RateLimit(8), "binance": RateLimit(20)}
+LIMITS = {"upbit": RateLimit(8), "binance": RateLimit(20)}
 
 
 def get(url, params=None, tries=4):
-    lim = LIMITS["api.upbit.com"] if "upbit" in url else LIMITS["binance"]
+    lim = LIMITS["upbit"] if "upbit" in url else LIMITS["binance"]
     for i in range(tries):
         lim.wait()
         try:
@@ -75,7 +85,7 @@ def get(url, params=None, tries=4):
                 continue
             r.raise_for_status()
             return r.json()
-        except requests.RequestException as e:
+        except requests.RequestException:
             if i == tries - 1:
                 raise
             time.sleep(1.0 * (i + 1))
@@ -87,19 +97,22 @@ def sma(vals, n, end):
     return sum(vals[end - n:end]) / n
 
 
-def check_cross(closes):
-    """closes = 마감된 봉 종가 리스트(오래된 → 최근). 반환: 'buy' / 'sell' / None, 지표값"""
+def analyze(closes):
+    """closes = 마감된 봉 종가(오래된 → 최근). 교차 여부와 임박 정보를 함께 계산"""
     if len(closes) < NEED:
-        return None, None
+        return None
     L = len(closes)
     f_now, s_now = sma(closes, FAST, L), sma(closes, SLOW, L)
     f_prev, s_prev = sma(closes, FAST, L - 1), sma(closes, SLOW, L - 1)
-    info = {"fast": f_now, "slow": s_now, "close": closes[-1]}
+    sig = None
     if f_prev <= s_prev and f_now > s_now:
-        return "buy", info
-    if f_prev >= s_prev and f_now < s_now:
-        return "sell", info
-    return None, info
+        sig = "buy"
+    elif f_prev >= s_prev and f_now < s_now:
+        sig = "sell"
+    gap = (f_now / s_now - 1) * 100
+    closing = (f_now - f_prev) - (s_now - s_prev)     # 한 봉 동안 두 선 간격이 좁혀진 양 (+면 50선이 따라붙는 중)
+    eta = (s_now - f_now) / closing if (f_now < s_now and closing > 0) else None
+    return {"sig": sig, "fast": f_now, "slow": s_now, "close": closes[-1], "gap": gap, "eta": eta}
 
 
 # ───────── 업비트 ─────────
@@ -114,27 +127,23 @@ def upbit_markets():
     return out
 
 
-def upbit_closes(market):
+def upbit_closes(market, iv):
     """마감된 봉만, 오래된 → 최근 순. 업비트는 한 번에 200개까지라 두 번 나눠 받음."""
-    unit = UPBIT_UNIT[INTERVAL]
-    url = f"https://api.upbit.com/v1/candles/{unit}"
+    url = f"https://api.upbit.com/v1/candles/{UPBIT_UNIT[iv]}"
     rows = get(url, {"market": market, "count": 200}) or []
     if len(rows) == 200:
         last_utc = rows[-1]["candle_date_time_utc"]
-        more = get(url, {"market": market, "count": 200, "to": last_utc + "Z"}) or []
-        rows += more
-    # 최신순으로 오므로 뒤집기. 첫 번째(가장 최신)가 진행 중인 봉인지 시간으로 판단
+        rows += get(url, {"market": market, "count": 200, "to": last_utc + "Z"}) or []
     now = datetime.now(timezone.utc)
-    sec = INTERVAL_SEC[INTERVAL]
-    closed = []
-    seen = set()
+    sec = INTERVAL_SEC[iv]
+    closed, seen = [], set()
     for r in rows:
         t = r["candle_date_time_utc"]
         if t in seen:
             continue
         seen.add(t)
         start = datetime.fromisoformat(t).replace(tzinfo=timezone.utc)
-        if (start + timedelta(seconds=sec)) <= now:
+        if start + timedelta(seconds=sec) <= now:      # 진행 중인 봉 제외
             closed.append((start, float(r["trade_price"])))
     closed.sort(key=lambda x: x[0])
     return [c for _, c in closed], (closed[-1][0] if closed else None)
@@ -166,14 +175,14 @@ def binance_markets():
         if s.get("status") != "TRADING" or s.get("quoteAsset") != "USDT":
             continue
         base = s["baseAsset"]
-        if base in STABLES or base.endswith(("UP", "DOWN", "BULL", "BEAR")) and len(base) > 4:
+        if base in STABLES or (base.endswith(("UP", "DOWN", "BULL", "BEAR")) and len(base) > 4):
             continue
         out.append({"code": s["symbol"], "name": base, "warn": False})
     return out
 
 
-def binance_closes(symbol):
-    rows = bn_get("/api/v3/klines", {"symbol": symbol, "interval": INTERVAL, "limit": NEED + 5})
+def binance_closes(symbol, iv):
+    rows = bn_get("/api/v3/klines", {"symbol": symbol, "interval": iv, "limit": NEED + 5})
     now_ms = time.time() * 1000
     closed = [(int(r[0]), float(r[4])) for r in rows if int(r[6]) < now_ms]  # r[6] = 마감 시각
     return [c for _, c in closed], (datetime.fromtimestamp(closed[-1][0] / 1000, timezone.utc) if closed else None)
@@ -211,24 +220,37 @@ def fmt_price(p, krw):
     return f"${p:,.4f}" if p < 1 else f"${p:,.2f}"
 
 
-def tv_link(ex, code):
+def tv_link(ex, code, iv):
     sym = f"UPBIT:{code.replace('KRW-', '')}KRW" if ex == "upbit" else f"BINANCE:{code}"
-    tf = {"4h": "240", "1h": "60", "15m": "15", "1d": "D", "1m": "1"}[INTERVAL]
-    return f"https://www.tradingview.com/chart/?symbol={sym}&interval={tf}"
+    return f"https://www.tradingview.com/chart/?symbol={sym}&interval={TV_TF[iv]}"
 
 
-# ───────── 메인 ─────────
-def scan(ex):
-    if ex == "upbit":
-        markets, fetch, krw, label = upbit_markets(), upbit_closes, True, "업비트"
-    else:
-        markets, fetch, krw, label = binance_markets(), binance_closes, False, "바이낸스"
-    log(f"{label}: {len(markets)}개 검사 시작")
-    hits, errors, short, bar_time = [], 0, 0, None
+def coin_line(h, iv):
+    warn = " ⚠️유의종목" if h["warn"] else ""
+    return (f"• [{LABEL[h['ex']]}] <a href=\"{tv_link(h['ex'], h['code'], iv)}\">{html.escape(h['code'])}</a> "
+            f"{html.escape(h['name'])}{warn}")
+
+
+def bar_range(bar, iv):
+    if not bar:
+        return ""
+    b0 = bar.astimezone(KST)
+    b1 = b0 + timedelta(seconds=INTERVAL_SEC[iv])
+    return f"{b0:%m/%d %H:%M} ~ {b1:%H:%M}"
+
+
+# ───────── 검사 ─────────
+def scan(ex, iv, markets=None):
+    """한 거래소·한 봉 기준으로 전체 코인을 분석. 코인별 결과 목록을 돌려줌"""
+    if markets is None:
+        markets = upbit_markets() if ex == "upbit" else binance_markets()
+    fetch = upbit_closes if ex == "upbit" else binance_closes
+    log(f"{LABEL[ex]} {iv}: {len(markets)}개 검사 시작")
+    rows, errors, short, bar_time = [], 0, 0, None
 
     def one(m):
         try:
-            return m, fetch(m["code"]), None
+            return m, fetch(m["code"], iv), None
         except Exception as e:
             return m, None, e
 
@@ -243,70 +265,142 @@ def scan(ex):
             closes, last_bar = res
             if last_bar and (bar_time is None or last_bar > bar_time):
                 bar_time = last_bar
-            sig, info = check_cross(closes)
-            if info is None:
+            a = analyze(closes)
+            if a is None:
                 short += 1
-            if sig == "buy" or (sig == "sell" and SELL_ALERTS):
-                hits.append({**m, "sig": sig, **info, "ex": ex, "krw": krw})
-                log(f"  ★ {sig} {m['code']}")
-    log(f"{label}: 신호 {len(hits)}개, 데이터 부족 {short}개, 오류 {errors}개")
-    res = {"label": label, "count": len(markets), "hits": hits, "errors": errors, "short": short, "bar": bar_time}
+                continue
+            rows.append({**m, **a, "ex": ex, "krw": ex == "upbit"})
+            if a["sig"]:
+                log(f"  ★ {iv} {a['sig']} {m['code']}")
+    log(f"{LABEL[ex]} {iv}: 분석 {len(rows)}개, 데이터 부족 {short}개, 오류 {errors}개")
+    res = {"ex": ex, "iv": iv, "count": len(markets), "rows": rows, "errors": errors, "bar": bar_time}
     if markets and errors > len(markets) / 2:
         res["fail"] = f"{len(markets)}개 중 {errors}개 실패"
     return res
 
 
-def main():
-    started = datetime.now(KST)
-    results = []
+def scan_all(iv, market_cache):
+    out = []
     for ex in [e.strip() for e in EXCHANGES if e.strip()]:
         try:
-            results.append(scan(ex))
+            if ex not in market_cache:
+                market_cache[ex] = upbit_markets() if ex == "upbit" else binance_markets()
+            out.append(scan(ex, iv, market_cache[ex]))
         except Exception as e:
-            log(f"{ex} 전체 실패: {e}")
-            results.append({"label": "업비트" if ex == "upbit" else "바이낸스", "count": 0, "hits": [],
-                            "errors": -1, "short": 0, "bar": None, "fail": str(e)[:150]})
+            log(f"{ex} {iv} 전체 실패: {e}")
+            out.append({"ex": ex, "iv": iv, "count": 0, "rows": [], "errors": -1, "bar": None, "fail": str(e)[:150]})
+    return out
 
-    all_hits = [h for r in results for h in r["hits"]]
-    lines = []
-    if all_hits:
-        buys = [h for h in all_hits if h["sig"] == "buy"]
-        sells = [h for h in all_hits if h["sig"] == "sell"]
-        lines.append(f"🟡 <b>Golden Trend 신호</b> ({INTERVAL}봉)")
-        bar = max((r["bar"] for r in results if r["bar"]), default=None)
-        if bar:
-            b0 = bar.astimezone(KST)
-            b1 = b0 + timedelta(seconds=INTERVAL_SEC[INTERVAL])
-            lines.append(f"기준봉: {b0:%m/%d %H:%M} ~ {b1:%H:%M} KST (마감 확정)")
-        lines.append("")
-        for title, group in (("📈 매수 신호 (50선이 200선 위로)", buys), ("📉 청산 신호 (50선이 200선 아래로)", sells)):
-            if not group:
-                continue
-            lines.append(f"<b>{title}</b>")
-            for h in group:
-                gap = (h["fast"] / h["slow"] - 1) * 100
-                warn = " ⚠️유의종목" if h["warn"] else ""
-                name = html.escape(h["name"])
-                lines.append(f"• [{'업비트' if h['ex'] == 'upbit' else '바이낸스'}] "
-                             f"<a href=\"{tv_link(h['ex'], h['code'])}\">{html.escape(h['code'])}</a> {name}{warn}")
-                lines.append(f"   종가 {fmt_price(h['close'], h['krw'])} · 50/200 간격 {gap:+.2f}%")
-            lines.append("")
+
+def signal_block(results, iv, title):
+    """새 교차 신호 블록. 신호가 없으면 빈 리스트"""
+    hits = [h for r in results for h in r["rows"] if h["sig"] == "buy" or (h["sig"] == "sell" and SELL_ALERTS)]
+    if not hits:
+        return [], 0
+    bar = max((r["bar"] for r in results if r["bar"]), default=None)
+    lines = [f"<b>{title}</b>  <i>{bar_range(bar, iv)} 봉</i>"]
+    for kind, head in (("buy", "📈 매수 (50선이 200선 위로)"), ("sell", "📉 청산 (50선이 200선 아래로)")):
+        group = [h for h in hits if h["sig"] == kind]
+        if not group:
+            continue
+        lines.append(head)
+        for h in group:
+            lines.append(coin_line(h, iv))
+            lines.append(f"   종가 {fmt_price(h['close'], h['krw'])} · 50/200 간격 {h['gap']:+.2f}%")
+    lines.append("")
+    return lines, len([h for h in hits if h["sig"] == "buy"])
+
+
+def near_block(results, iv):
+    """골든크로스 임박: 50선이 200선 바로 아래에서 빠르게 따라붙는 코인"""
+    lines = [f"<b>⏳ {iv}봉 골든크로스 임박</b>  <i>(200선 아래 {NEAR_GAP}% 이내 · 지금 속도면 {NEAR_BARS}봉 안)</i>"]
+    total = 0
     for r in results:
-        if r.get("fail"):
-            lines.append(f"⚠️ {r['label']} 데이터를 못 받았어요: {html.escape(r['fail'])}")
-    if all_hits or HEARTBEAT or any(r.get("fail") for r in results):
-        if not all_hits:
-            lines.insert(0, f"✅ Golden Trend 검사 완료 ({INTERVAL}봉) — 새 신호 없음")
-        summary = " / ".join(f"{r['label']} {r['count']}개" for r in results)
-        lines.append(f"<i>{started:%m/%d %H:%M} KST · {summary} 검사</i>")
-        lines.append("<i>투자 권유가 아닌 신호 알림입니다.</i>")
-        tg_send("\n".join(lines))
+        near = [h for h in r["rows"] if h["eta"] is not None and -NEAR_GAP <= h["gap"] < 0 and h["eta"] <= NEAR_BARS]
+        near.sort(key=lambda h: h["eta"])
+        total += len(near)
+        if not near:
+            continue
+        lines.append(f"{LABEL[r['ex']]} ({len(near)}개{' 중 ' + str(NEAR_MAX) + '개' if len(near) > NEAR_MAX else ''})")
+        for h in near[:NEAR_MAX]:
+            bars = max(1, math.ceil(h["eta"]))
+            hours = bars * INTERVAL_SEC[iv] // 3600
+            lines.append(coin_line(h, iv))
+            lines.append(f"   간격 {h['gap']:+.2f}% · {'다음 봉' if bars == 1 else f'약 {bars}봉'}(≈{hours}시간 안) 교차 예상")
+    if total == 0:
+        lines.append("지금 조건에 맞는 코인 없음")
+    lines.append("<i>※ 예상은 지금 속도가 그대로일 때의 단순 계산이라 빗나갈 수 있어요.</i>")
+    lines.append("")
+    return lines
+
+
+def fail_lines(results):
+    return [f"⚠️ {LABEL[r['ex']]} {r['iv']} 데이터를 못 받았어요: {html.escape(r['fail'])}" for r in results if r.get("fail")]
+
+
+def summary_line(started, results):
+    seen, parts = set(), []
+    for r in results:
+        if r["ex"] in seen:
+            continue
+        seen.add(r["ex"])
+        parts.append(f"{LABEL[r['ex']]} {r['count']}개")
+    return f"<i>{started:%m/%d %H:%M} KST · {' / '.join(parts)} 검사 · 투자 권유가 아닌 신호 알림입니다.</i>"
+
+
+def run_scan():
+    """4시간마다: 새 신호가 있을 때만 알림"""
+    started = datetime.now(KST)
+    res = scan_all(INTERVAL, {})
+    sig_lines, _ = signal_block(res, INTERVAL, f"🟡 Golden Trend {INTERVAL}봉 신호")
+    fails = fail_lines(res)
+    if sig_lines or fails or HEARTBEAT:
+        lines = sig_lines or [f"✅ Golden Trend 검사 완료 ({INTERVAL}봉) — 새 신호 없음", ""]
+        tg_send("\n".join(lines + fails + [summary_line(started, res)]))
     else:
         log("새 신호 없음 — 텔레그램 안 보냄")
 
 
+def run_report():
+    """KST 00시·09시 정기 리포트: 항상 보냄"""
+    started = datetime.now(KST)
+    cache = {}
+    res4 = scan_all("4h", cache)
+    res1 = scan_all("1h", cache)
+
+    lines = [f"🕘 <b>Golden Trend 정기 리포트</b> ({started:%m/%d %H:%M} KST)", ""]
+
+    # ① 4시간봉 새 신호: 4시간봉이 막 마감된 때(봉 마감 후 1시간 이내)만. 아니면 4시간 검사에서 이미 보낸 신호라 생략
+    bar4 = max((r["bar"] for r in res4 if r["bar"]), default=None)
+    fresh4 = bar4 and (datetime.now(timezone.utc) - (bar4 + timedelta(hours=4))) < timedelta(hours=1)
+    n4 = 0
+    if fresh4:
+        sig4, n4 = signal_block(res4, "4h", "🟡 4시간봉 새 신호")
+        lines += sig4 or ["🟡 4시간봉 새 신호: 없음", ""]
+
+    # ② 1시간봉 새 신호
+    sig1, n1 = signal_block(res1, "1h", "🔵 1시간봉 새 신호")
+    lines += sig1 or ["🔵 1시간봉 새 신호: 없음", ""]
+
+    # ③ 4시간봉 임박 목록
+    lines += near_block(res4, "4h")
+
+    # ④ 요약
+    up4 = sum(1 for r in res4 for h in r["rows"] if h["fast"] > h["slow"])
+    all4 = sum(len(r["rows"]) for r in res4)
+    if all4:
+        lines.append(f"📊 지금 4시간봉 50선이 200선 위에 있는 코인: {up4}/{all4}개 ({up4 / all4 * 100:.0f}%)")
+    lines.append(f"새 매수 신호: 4시간봉 {n4 if fresh4 else '-'}개 · 1시간봉 {n1}개")
+    lines += fail_lines(res4 + res1)
+    lines.append(summary_line(started, res4))
+    tg_send("\n".join(lines))
+
+
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "test":
+    mode = sys.argv[1] if len(sys.argv) > 1 else "scan"
+    if mode == "test":
         tg_send("✅ Golden Trend 알림 봇 연결 테스트 성공! 이제 신호가 뜨면 여기로 알려드릴게요.")
+    elif mode == "report":
+        run_report()
     else:
-        main()
+        run_scan()
