@@ -97,8 +97,20 @@ def sma(vals, n, end):
     return sum(vals[end - n:end]) / n
 
 
-def analyze(closes):
-    """closes = 마감된 봉 종가(오래된 → 최근). 교차 여부와 임박 정보를 함께 계산"""
+def rsi(closes, n=14):
+    """와일더 방식 RSI (트레이딩뷰 ta.rsi와 같은 계산)"""
+    if len(closes) <= n:
+        return None
+    gains = [max(closes[i] - closes[i - 1], 0) for i in range(1, len(closes))]
+    losses = [max(closes[i - 1] - closes[i], 0) for i in range(1, len(closes))]
+    ag, al = sum(gains[:n]) / n, sum(losses[:n]) / n
+    for g, l in zip(gains[n:], losses[n:]):
+        ag, al = (ag * (n - 1) + g) / n, (al * (n - 1) + l) / n
+    return 100.0 if al == 0 else 100 - 100 / (1 + ag / al)
+
+
+def analyze(closes, vols=None):
+    """closes = 마감된 봉 종가(오래된 → 최근). 교차 여부·임박 정보·RSI·거래량 배수를 함께 계산"""
     if len(closes) < NEED:
         return None
     L = len(closes)
@@ -112,7 +124,23 @@ def analyze(closes):
     gap = (f_now / s_now - 1) * 100
     closing = (f_now - f_prev) - (s_now - s_prev)     # 한 봉 동안 두 선 간격이 좁혀진 양 (+면 50선이 따라붙는 중)
     eta = (s_now - f_now) / closing if (f_now < s_now and closing > 0) else None
-    return {"sig": sig, "fast": f_now, "slow": s_now, "close": closes[-1], "gap": gap, "eta": eta}
+    vol_x = None
+    if vols and len(vols) >= 21:
+        base = sum(vols[-21:-1]) / 20
+        vol_x = vols[-1] / base if base > 0 else None
+    return {"sig": sig, "fast": f_now, "slow": s_now, "close": closes[-1], "gap": gap, "eta": eta,
+            "rsi": rsi(closes[-150:]), "vol_x": vol_x}
+
+
+def light(a):
+    """한 봉 기준 신호등: 🟢 50선이 200선 위 / 🟡 아래지만 교차 임박 / 🔴 아래 / ⚪ 데이터 부족"""
+    if a is None:
+        return "⚪"
+    if a["fast"] > a["slow"]:
+        return "🟢"
+    if a["eta"] is not None and a["gap"] >= -NEAR_GAP and a["eta"] <= NEAR_BARS:
+        return "🟡"
+    return "🔴"
 
 
 # ───────── 업비트 ─────────
@@ -144,9 +172,9 @@ def upbit_closes(market, iv):
         seen.add(t)
         start = datetime.fromisoformat(t).replace(tzinfo=timezone.utc)
         if start + timedelta(seconds=sec) <= now:      # 진행 중인 봉 제외
-            closed.append((start, float(r["trade_price"])))
+            closed.append((start, float(r["trade_price"]), float(r["candle_acc_trade_volume"])))
     closed.sort(key=lambda x: x[0])
-    return [c for _, c in closed], (closed[-1][0] if closed else None)
+    return [c for _, c, _ in closed], [v for _, _, v in closed], (closed[-1][0] if closed else None)
 
 
 # ───────── 바이낸스 ─────────
@@ -184,8 +212,9 @@ def binance_markets():
 def binance_closes(symbol, iv):
     rows = bn_get("/api/v3/klines", {"symbol": symbol, "interval": iv, "limit": NEED + 5})
     now_ms = time.time() * 1000
-    closed = [(int(r[0]), float(r[4])) for r in rows if int(r[6]) < now_ms]  # r[6] = 마감 시각
-    return [c for _, c in closed], (datetime.fromtimestamp(closed[-1][0] / 1000, timezone.utc) if closed else None)
+    closed = [(int(r[0]), float(r[4]), float(r[5])) for r in rows if int(r[6]) < now_ms]  # r[6] = 마감 시각
+    return ([c for _, c, _ in closed], [v for _, _, v in closed],
+            datetime.fromtimestamp(closed[-1][0] / 1000, timezone.utc) if closed else None)
 
 
 # ───────── 텔레그램 ─────────
@@ -262,10 +291,10 @@ def scan(ex, iv, markets=None):
                 if errors <= 3:
                     log(f"  오류 {m['code']}: {err}")
                 continue
-            closes, last_bar = res
+            closes, vols, last_bar = res
             if last_bar and (bar_time is None or last_bar > bar_time):
                 bar_time = last_bar
-            a = analyze(closes)
+            a = analyze(closes, vols)
             if a is None:
                 short += 1
                 continue
@@ -306,9 +335,101 @@ def signal_block(results, iv, title):
         lines.append(head)
         for h in group:
             lines.append(coin_line(h, iv))
-            lines.append(f"   종가 {fmt_price(h['close'], h['krw'])} · 50/200 간격 {h['gap']:+.2f}%")
+            if h.get("lights"):
+                tl = "  ".join(f"{k} {v}{'(방금 교차)' if k == iv else ''}" for k, v in h["lights"].items())
+                lines.append(f"   {tl}")
+            extra = []
+            if h.get("vol_x") is not None:
+                extra.append(f"거래량 {h['vol_x']:.1f}배")
+            if h.get("rsi") is not None:
+                extra.append(f"RSI {h['rsi']:.0f}")
+            lines.append(f"   종가 {fmt_price(h['close'], h['krw'])} · " + " · ".join(extra or [f"간격 {h['gap']:+.2f}%"]))
+            if h.get("strength") and kind == "buy":
+                icon, word, why = h["strength"]
+                lines.append(f"   → 신호 강도 {icon} {word}" + (f" ({', '.join(why)})" if why else ""))
     lines.append("")
     return lines, len([h for h in hits if h["sig"] == "buy"])
+
+
+TF_ORDER = ("1h", "4h", "1d")
+
+
+def enrich(results, iv, known):
+    """신호가 난 코인에 1시간·4시간·일봉 신호등과 신호 강도를 붙임.
+    known = {봉: {(거래소, 코드): 분석결과}} — 이미 전체 검사한 봉은 다시 받지 않음"""
+    for r in results:
+        for h in r["rows"]:
+            if h["sig"] != "buy" and not (h["sig"] == "sell" and SELL_ALERTS):
+                continue
+            lights, other = {}, {}
+            for tf in TF_ORDER:
+                if tf == iv:
+                    a = h
+                elif (h["ex"], h["code"]) in known.get(tf, {}):
+                    a = known[tf][(h["ex"], h["code"])]
+                else:
+                    try:
+                        fetch = upbit_closes if h["ex"] == "upbit" else binance_closes
+                        c, v, _ = fetch(h["code"], tf)
+                        a = analyze(c, v)
+                    except Exception:
+                        a = None
+                lights[tf] = light(a)
+                if tf != iv:
+                    other[tf] = a
+            h["lights"] = lights
+            h["strength"] = strength(h, iv, lights)
+
+
+def strength(h, iv, lights):
+    """신호 강도: 다른 봉 추세·거래량·RSI를 점수로 묶음"""
+    score, why = 0, []
+    for tf in TF_ORDER:
+        if tf == iv:
+            continue
+        if lights[tf] == "🟢":
+            score += 2 if tf == "1d" else 1
+        elif lights[tf] == "🟡":
+            score += 1 if tf == "1d" else 0
+            why.append(f"{tf} 교차 직전")
+        elif lights[tf] == "🔴":
+            why.append(f"{'일봉' if tf == '1d' else tf} 아직 하락")
+    vx = h.get("vol_x")
+    if vx is not None:
+        if vx >= 1.5:
+            score += 1
+        elif vx < 0.8:
+            score -= 1
+            why.append(f"거래량 약함({vx:.1f}배)")
+    r = h.get("rsi")
+    if r is not None:
+        if r >= 75:
+            score -= 1
+            why.append(f"RSI 과열({r:.0f})")
+        elif 50 <= r < 75:
+            score += 1
+    if score >= 4:
+        return "🟢", "강함", why
+    if score >= 2:
+        return "🟡", "보통", why
+    return "🔴", "약함", why
+
+
+def market_light(res4):
+    """시장 신호등: 4시간봉 50선이 200선 위인 코인 비율 + 비트코인 4시간봉"""
+    rows = [h for r in res4 for h in r["rows"]]
+    if not rows:
+        return None
+    pct = sum(1 for h in rows if h["fast"] > h["slow"]) / len(rows) * 100
+    btc = next((h for h in rows if h["code"] in ("KRW-BTC", "BTCUSDT")), None)
+    btc_up = btc is not None and btc["fast"] > btc["slow"]
+    if pct >= 60 and btc_up:
+        icon = "🟢"
+    elif pct < 40 and not btc_up:
+        icon = "🔴"
+    else:
+        icon = "🟡"
+    return f"🚦 시장 신호등 {icon}  4시간봉 상승 추세 코인 {pct:.0f}% · 비트코인 4h {light(btc)}"
 
 
 def near_block(results, iv):
@@ -352,11 +473,14 @@ def run_scan():
     """4시간마다: 새 신호가 있을 때만 알림"""
     started = datetime.now(KST)
     res = scan_all(INTERVAL, {})
+    enrich(res, INTERVAL, {})
     sig_lines, _ = signal_block(res, INTERVAL, f"🟡 Golden Trend {INTERVAL}봉 신호")
     fails = fail_lines(res)
     if sig_lines or fails or HEARTBEAT:
         lines = sig_lines or [f"✅ Golden Trend 검사 완료 ({INTERVAL}봉) — 새 신호 없음", ""]
-        tg_send("\n".join(lines + fails + [summary_line(started, res)]))
+        ml = market_light(res) if INTERVAL == "4h" else None
+        legend = ["<i>신호등: 🟢 50선이 200선 위 · 🟡 교차 임박 · 🔴 아래 · ⚪ 데이터 부족</i>"] if sig_lines else []
+        tg_send("\n".join(lines + ([ml] if ml else []) + legend + fails + [summary_line(started, res)]))
     else:
         log("새 신호 없음 — 텔레그램 안 보냄")
 
@@ -367,8 +491,13 @@ def run_report():
     cache = {}
     res4 = scan_all("4h", cache)
     res1 = scan_all("1h", cache)
+    known = {iv: {(h["ex"], h["code"]): h for r in rr for h in r["rows"]} for iv, rr in (("4h", res4), ("1h", res1))}
+    enrich(res4, "4h", known)
+    enrich(res1, "1h", known)
 
-    lines = [f"🕘 <b>Golden Trend 정기 리포트</b> ({started:%m/%d %H:%M} KST)", ""]
+    lines = [f"🕘 <b>Golden Trend 정기 리포트</b> ({started:%m/%d %H:%M} KST)"]
+    ml = market_light(res4)
+    lines += [ml, ""] if ml else [""]
 
     # ① 4시간봉 새 신호: 4시간봉이 막 마감된 때(봉 마감 후 1시간 이내)만. 아니면 4시간 검사에서 이미 보낸 신호라 생략
     bar4 = max((r["bar"] for r in res4 if r["bar"]), default=None)
@@ -386,10 +515,7 @@ def run_report():
     lines += near_block(res4, "4h")
 
     # ④ 요약
-    up4 = sum(1 for r in res4 for h in r["rows"] if h["fast"] > h["slow"])
-    all4 = sum(len(r["rows"]) for r in res4)
-    if all4:
-        lines.append(f"📊 지금 4시간봉 50선이 200선 위에 있는 코인: {up4}/{all4}개 ({up4 / all4 * 100:.0f}%)")
+    lines.append("<i>신호등: 🟢 50선이 200선 위 · 🟡 교차 임박 · 🔴 아래 · ⚪ 데이터 부족</i>")
     lines.append(f"새 매수 신호: 4시간봉 {n4 if fresh4 else '-'}개 · 1시간봉 {n1}개")
     lines += fail_lines(res4 + res1)
     lines.append(summary_line(started, res4))
