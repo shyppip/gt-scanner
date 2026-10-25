@@ -14,6 +14,8 @@ import sys
 import time
 import json
 import html
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone, timedelta
 
 import requests
@@ -43,8 +45,29 @@ def log(*a):
     print(datetime.now(KST).strftime("%H:%M:%S"), *a, flush=True)
 
 
+class RateLimit:
+    """여러 스레드가 함께 써도 초당 요청 수를 넘지 않게 막는 장치"""
+    def __init__(self, per_sec):
+        self.gap = 1.0 / per_sec
+        self.lock = threading.Lock()
+        self.next = 0.0
+
+    def wait(self):
+        with self.lock:
+            now = time.monotonic()
+            t = max(now, self.next)
+            self.next = t + self.gap
+        if t > now:
+            time.sleep(t - now)
+
+
+LIMITS = {"api.upbit.com": RateLimit(8), "binance": RateLimit(20)}
+
+
 def get(url, params=None, tries=4):
+    lim = LIMITS["api.upbit.com"] if "upbit" in url else LIMITS["binance"]
     for i in range(tries):
+        lim.wait()
         try:
             r = requests.get(url, params=params, headers=UA, timeout=15)
             if r.status_code == 429:
@@ -100,7 +123,6 @@ def upbit_closes(market):
         last_utc = rows[-1]["candle_date_time_utc"]
         more = get(url, {"market": market, "count": 200, "to": last_utc + "Z"}) or []
         rows += more
-        time.sleep(0.12)
     # 최신순으로 오므로 뒤집기. 첫 번째(가장 최신)가 진행 중인 봉인지 시간으로 판단
     now = datetime.now(timezone.utc)
     sec = INTERVAL_SEC[INTERVAL]
@@ -203,9 +225,22 @@ def scan(ex):
         markets, fetch, krw, label = binance_markets(), binance_closes, False, "바이낸스"
     log(f"{label}: {len(markets)}개 검사 시작")
     hits, errors, short, bar_time = [], 0, 0, None
-    for i, m in enumerate(markets):
+
+    def one(m):
         try:
-            closes, last_bar = fetch(m["code"])
+            return m, fetch(m["code"]), None
+        except Exception as e:
+            return m, None, e
+
+    # 여러 개를 동시에 받되, 초당 요청 수는 RateLimit이 지켜줌
+    with ThreadPoolExecutor(max_workers=4 if ex == "upbit" else 8) as pool:
+        for m, res, err in pool.map(one, markets):
+            if err is not None:
+                errors += 1
+                if errors <= 3:
+                    log(f"  오류 {m['code']}: {err}")
+                continue
+            closes, last_bar = res
             if last_bar and (bar_time is None or last_bar > bar_time):
                 bar_time = last_bar
             sig, info = check_cross(closes)
@@ -214,13 +249,11 @@ def scan(ex):
             if sig == "buy" or (sig == "sell" and SELL_ALERTS):
                 hits.append({**m, "sig": sig, **info, "ex": ex, "krw": krw})
                 log(f"  ★ {sig} {m['code']}")
-        except Exception as e:
-            errors += 1
-            if errors <= 3:
-                log(f"  오류 {m['code']}: {e}")
-        time.sleep(0.11 if ex == "upbit" else 0.05)
     log(f"{label}: 신호 {len(hits)}개, 데이터 부족 {short}개, 오류 {errors}개")
-    return {"label": label, "count": len(markets), "hits": hits, "errors": errors, "short": short, "bar": bar_time}
+    res = {"label": label, "count": len(markets), "hits": hits, "errors": errors, "short": short, "bar": bar_time}
+    if markets and errors > len(markets) / 2:
+        res["fail"] = f"{len(markets)}개 중 {errors}개 실패"
+    return res
 
 
 def main():
