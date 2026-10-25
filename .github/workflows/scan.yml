@@ -33,7 +33,7 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           GT_INTERVAL: "4h"
           GT_SELL_ALERTS: ${{ vars.GT_SELL_ALERTS || 'false' }}
-          GT_HEARTBEAT: ${{ vars.GT_HEARTBEAT || 'false' }}
+          GT_HEARTBEAT: ${{ vars.GT_HEARTBEAT || 'true' }}
           GT_TREND_TOP: ${{ vars.GT_TREND_TOP || '120' }}
           MODE_INPUT: ${{ github.event.inputs.mode }}
         run: |
