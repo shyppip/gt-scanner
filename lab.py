@@ -238,10 +238,10 @@ def rsi(c, n=14):
     return [None if u is None else (100.0 if d == 0 else 100 - 100 / (1 + u / d)) for u, d in zip(au, ad)]
 
 
-def macd_hist(c):
-    m = [None if a is None or b is None else a - b for a, b in zip(ema(c, 12), ema(c, 26))]
+def macd_hist(c, f=12, sl=26, sg=9):
+    m = [None if a is None or b is None else a - b for a, b in zip(ema(c, f), ema(c, sl))]
     st = next(i for i, v in enumerate(m) if v is not None)
-    sig = [None] * st + ema(m[st:], 9)
+    sig = [None] * st + ema(m[st:], sg)
     return [None if a is None or b is None else a - b for a, b in zip(m, sig)]
 
 
@@ -366,22 +366,23 @@ def combine(up, entry_ok=None, early_exit=None, reentry_ok=None):
 
 
 def build_combos(bars):
+    """1차(8종) 결과: RSI·CCI 진입필터는 변화 없음, 슈퍼트렌드·PSAR·StochRSI·돈치안 조기청산/재진입은 효율 하락.
+    MACD>0·일목 구름위 진입필터만 앞/뒤 절반 모두 개선 → 2차: 설정값 주변·조합 확인"""
     c = [b["c"] for b in bars]
     up = cross_state(ema(c, 20), ema(c, 200))
-    R, M, CC = rsi(c), macd_hist(c), cci(bars)
-    ST, SAR = supertrend(bars), psar(bars)
-    SR, ICH, DC = stoch_rsi_cross_up(c), ichimoku_above(bars), donchian_break(bars)
+    ICH = ichimoku_above(bars)
+    M = {k: macd_hist(c, *k) for k in ((12, 26, 9), (8, 21, 5), (19, 39, 9), (12, 26, 5), (12, 26, 15))}
+    mok = lambda k: (lambda i: M[k][i] is not None and M[k][i] > 0)
     return [
         ("EMA 20/200 (현재)", up),
-        ("+RSI>50 진입", combine(up, entry_ok=lambda i: R[i] is not None and R[i] > 50)),
-        ("+MACD>0 진입", combine(up, entry_ok=lambda i: M[i] is not None and M[i] > 0)),
-        ("+CCI>0 진입", combine(up, entry_ok=lambda i: CC[i] is not None and CC[i] > 0)),
+        ("+MACD(12,26,9)>0 진입", combine(up, entry_ok=mok((12, 26, 9)))),
+        ("+MACD(8,21,5)>0 진입", combine(up, entry_ok=mok((8, 21, 5)))),
+        ("+MACD(19,39,9)>0 진입", combine(up, entry_ok=mok((19, 39, 9)))),
+        ("+MACD(12,26,5)>0 진입", combine(up, entry_ok=mok((12, 26, 5)))),
+        ("+MACD(12,26,15)>0 진입", combine(up, entry_ok=mok((12, 26, 15)))),
         ("+일목 구름위 진입", combine(up, entry_ok=lambda i: ICH[i])),
-        ("+슈퍼트렌드 청산·재진입", combine(up, early_exit=lambda i: ST[i] == -1)),
-        ("+PSAR 청산·재진입", combine(up, early_exit=lambda i: SAR[i] == -1)),
-        ("+슈퍼트렌드청산 StochRSI재진입", combine(up, early_exit=lambda i: ST[i] == -1,
-                                         reentry_ok=lambda i: SR[i] or (ST[i] == 1 and ST[i - 1] == -1))),
-        ("+PSAR청산 돈치안돌파재진입", combine(up, early_exit=lambda i: SAR[i] == -1, reentry_ok=lambda i: DC[i])),
+        ("+MACD>0 & 일목 진입", combine(up, entry_ok=lambda i: mok((12, 26, 9))(i) and ICH[i])),
+        ("+MACD>0 또는 일목 진입", combine(up, entry_ok=lambda i: mok((12, 26, 9))(i) or ICH[i])),
     ]
 
 
