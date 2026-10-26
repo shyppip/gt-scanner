@@ -221,33 +221,181 @@ def tg_send(text):
                   json={"chat_id": TG_CHAT, "text": text[:3900], "parse_mode": "HTML", "disable_web_page_preview": True}, timeout=20)
 
 
+# ───────── Gemini 추천 보조지표 8종 (EMA 20/200과 결합) ─────────
+def rma(vals, n):
+    out, acc = [None] * len(vals), None
+    for i, v in enumerate(vals):
+        acc = v if acc is None else (acc * (n - 1) + v) / n
+        if i >= n - 1:
+            out[i] = acc
+    return out
+
+
+def rsi(c, n=14):
+    up = [0.0] + [max(c[i] - c[i - 1], 0) for i in range(1, len(c))]
+    dn = [0.0] + [max(c[i - 1] - c[i], 0) for i in range(1, len(c))]
+    au, ad = rma(up, n), rma(dn, n)
+    return [None if u is None else (100.0 if d == 0 else 100 - 100 / (1 + u / d)) for u, d in zip(au, ad)]
+
+
+def macd_hist(c):
+    m = [None if a is None or b is None else a - b for a, b in zip(ema(c, 12), ema(c, 26))]
+    st = next(i for i, v in enumerate(m) if v is not None)
+    sig = [None] * st + ema(m[st:], 9)
+    return [None if a is None or b is None else a - b for a, b in zip(m, sig)]
+
+
+def true_range(bars):
+    return [bars[0]["h"] - bars[0]["l"]] + [max(bars[i]["h"] - bars[i]["l"], abs(bars[i]["h"] - bars[i - 1]["c"]),
+                                                abs(bars[i]["l"] - bars[i - 1]["c"])) for i in range(1, len(bars))]
+
+
+def supertrend(bars, n=10, mult=3.0):
+    """트레이딩뷰 ta.supertrend와 같은 방식. 1=상승, -1=하락"""
+    atr = rma(true_range(bars), n)
+    d = [0] * len(bars)
+    up_prev = dn_prev = None
+    for i, b in enumerate(bars):
+        if atr[i] is None:
+            continue
+        hl2 = (b["h"] + b["l"]) / 2
+        up, dn = hl2 - mult * atr[i], hl2 + mult * atr[i]
+        pc = bars[i - 1]["c"]
+        if up_prev is not None and pc > up_prev:
+            up = max(up, up_prev)
+        if dn_prev is not None and pc < dn_prev:
+            dn = min(dn, dn_prev)
+        if up_prev is None:
+            d[i] = 1
+        elif d[i - 1] == -1 and b["c"] > dn_prev:
+            d[i] = 1
+        elif d[i - 1] == 1 and b["c"] < up_prev:
+            d[i] = -1
+        else:
+            d[i] = d[i - 1] or 1
+        up_prev, dn_prev = up, dn
+    return d
+
+
+def psar(bars, step=0.02, mx=0.2):
+    """파라볼릭 SAR. 1=가격이 SAR 위(상승), -1=아래"""
+    d = [1] * len(bars)
+    bull, af, ep, sar = True, step, bars[0]["h"], bars[0]["l"]
+    for i in range(1, len(bars)):
+        b = bars[i]
+        sar = sar + af * (ep - sar)
+        if bull:
+            sar = min(sar, bars[i - 1]["l"], bars[i - 2]["l"] if i > 1 else bars[i - 1]["l"])
+            if b["l"] < sar:
+                bull, sar, ep, af = False, ep, b["l"], step
+            elif b["h"] > ep:
+                ep, af = b["h"], min(af + step, mx)
+        else:
+            sar = max(sar, bars[i - 1]["h"], bars[i - 2]["h"] if i > 1 else bars[i - 1]["h"])
+            if b["h"] > sar:
+                bull, sar, ep, af = True, ep, b["h"], step
+            elif b["l"] < ep:
+                ep, af = b["l"], min(af + step, mx)
+        d[i] = 1 if bull else -1
+    return d
+
+
+def stoch_rsi_cross_up(c, n=14, k=3, dd=3, level=20):
+    r = rsi(c, n)
+    st = [None] * len(c)
+    for i in range(len(c)):
+        w = [x for x in r[max(0, i - n + 1):i + 1] if x is not None]
+        if len(w) == n:
+            lo, hi = min(w), max(w)
+            st[i] = 0.0 if hi == lo else (r[i] - lo) / (hi - lo) * 100
+    s0 = next(i for i, v in enumerate(st) if v is not None)
+    K = [None] * s0 + sma(st[s0:], k)
+    k0 = next(i for i, v in enumerate(K) if v is not None)
+    D = [None] * k0 + sma(K[k0:], dd)
+    return [i > 0 and None not in (K[i], D[i], K[i - 1], D[i - 1]) and K[i - 1] <= D[i - 1] and K[i] > D[i] and K[i - 1] < level
+            for i in range(len(c))]
+
+
+def ichimoku_above(bars):
+    h, l, c = [b["h"] for b in bars], [b["l"] for b in bars], [b["c"] for b in bars]
+    mid = lambda i, n: (max(h[i - n + 1:i + 1]) + min(l[i - n + 1:i + 1])) / 2 if i >= n - 1 else None
+    out = [False] * len(c)
+    for i in range(len(c)):
+        j = i - 25                                       # 구름은 25봉 앞으로 그려짐(트레이딩뷰 기본)
+        if j < 51:
+            continue
+        a, b = (mid(j, 9) + mid(j, 26)) / 2, mid(j, 52)
+        out[i] = c[i] > max(a, b)
+    return out
+
+
+def donchian_break(bars, n=20):
+    return [i >= n and bars[i]["c"] > max(b["h"] for b in bars[i - n:i]) for i in range(len(bars))]
+
+
+def cci(bars, n=20):
+    tp = [(b["h"] + b["l"] + b["c"]) / 3 for b in bars]
+    m = sma(tp, n)
+    out = [None] * len(tp)
+    for i in range(n - 1, len(tp)):
+        md = sum(abs(x - m[i]) for x in tp[i - n + 1:i + 1]) / n
+        out[i] = 0.0 if md == 0 else (tp[i] - m[i]) / (0.015 * md)
+    return out
+
+
+def combine(up, entry_ok=None, early_exit=None, reentry_ok=None):
+    """EMA 상승(up=1)일 때만 보유. entry_ok: 처음 들어갈 때 조건, early_exit: 데드크로스 전 조기 청산 조건,
+    reentry_ok: 조기 청산 뒤 다시 들어갈 조건(없으면 early_exit이 풀리면 재진입)"""
+    pos, cur, stopped = [None] * len(up), 0.0, False
+    for i, u in enumerate(up):
+        if u is None:
+            continue
+        if u != 1.0:
+            cur, stopped = 0.0, False
+        elif cur == 0.0:
+            if stopped:
+                ok = reentry_ok(i) if reentry_ok else not early_exit(i)
+            else:
+                ok = entry_ok(i) if entry_ok else True
+            if ok:
+                cur, stopped = 1.0, False
+        elif early_exit and early_exit(i):
+            cur, stopped = 0.0, True
+        pos[i] = cur
+    return pos
+
+
+def build_combos(bars):
+    c = [b["c"] for b in bars]
+    up = cross_state(ema(c, 20), ema(c, 200))
+    R, M, CC = rsi(c), macd_hist(c), cci(bars)
+    ST, SAR = supertrend(bars), psar(bars)
+    SR, ICH, DC = stoch_rsi_cross_up(c), ichimoku_above(bars), donchian_break(bars)
+    return [
+        ("EMA 20/200 (현재)", up),
+        ("+RSI>50 진입", combine(up, entry_ok=lambda i: R[i] is not None and R[i] > 50)),
+        ("+MACD>0 진입", combine(up, entry_ok=lambda i: M[i] is not None and M[i] > 0)),
+        ("+CCI>0 진입", combine(up, entry_ok=lambda i: CC[i] is not None and CC[i] > 0)),
+        ("+일목 구름위 진입", combine(up, entry_ok=lambda i: ICH[i])),
+        ("+슈퍼트렌드 청산·재진입", combine(up, early_exit=lambda i: ST[i] == -1)),
+        ("+PSAR 청산·재진입", combine(up, early_exit=lambda i: SAR[i] == -1)),
+        ("+슈퍼트렌드청산 StochRSI재진입", combine(up, early_exit=lambda i: ST[i] == -1,
+                                         reentry_ok=lambda i: SR[i] or (ST[i] == 1 and ST[i - 1] == -1))),
+        ("+PSAR청산 돈치안돌파재진입", combine(up, early_exit=lambda i: SAR[i] == -1, reentry_ok=lambda i: DC[i])),
+    ]
+
+
 if __name__ == "__main__":
     d = lambda bars, i: datetime.fromtimestamp(bars[i]["t"] / 1000, tz=KST).strftime("%Y-%m-%d")
+    bars = klines(SYMBOL, YEARS, "4h")
+    bpy = 365 * 6
+    combos = build_combos(bars)
+    first = WARMUP
+    mid = (first + len(bars)) // 2
+    print(f"######## {SYMBOL} 4h {len(bars)}개 · {d(bars, first)} ~ {d(bars, len(bars) - 1)} (앞/뒤 경계 {d(bars, mid)}) · 편도비용 {SIDE_COST * 100:.1f}%")
     report = []
-    for interval, yrs in (("4h", YEARS), ("1h", YEARS)):
-        bars = klines(SYMBOL, yrs, interval)
-        bpy = 365 * {"1h": 24, "4h": 6}[interval]
-        c = [b["c"] for b in bars]
-        base = cross_state(ema(c, 20), ema(c, 200))
-        raw = squeeze_signals(bars)
-        filt = squeeze_signals(bars, trend=base)
-        first = WARMUP
-        mid = (first + len(bars)) // 2
-        print(f"\n######## {SYMBOL} {interval} {len(bars)}개 · {d(bars, first)} ~ {d(bars, len(bars) - 1)} (앞/뒤 경계 {d(bars, mid)}) · 편도비용 {SIDE_COST * 100:.1f}%")
-        print(f"롱 신호: 필터 없음 {sum(1 for s in raw[first:] if s > 0)}번 / EMA20>200 필터 {sum(1 for s in filt[first:] if s > 0)}번")
-        for title, a, b in (("전체 기간", first, len(bars)), ("앞 절반", first, mid), ("뒤 절반", mid, len(bars))):
-            r_base = run(bars, base, a, b, bpy)
-            r_raw = run_squeeze(bars, raw, a, b, bpy, 2.0, 1.0, True)
-            r_f = run_squeeze(bars, filt, a, b, bpy, 2.0, 1.0, True)
-            r_f3 = run_squeeze(bars, filt, a, b, bpy, 3.0, 1.5, True)
-            rows = [("EMA 20/200 (현재 GT1-S)", r_base),
-                    ("볼벤 롱만 2/1 필터없음", r_raw),
-                    ("볼벤 롱만 2/1 +EMA필터", r_f),
-                    ("볼벤 롱만 3/1.5 +EMA필터", r_f3),
-                    ("반반: EMA + 볼벤필터2/1", blend(r_base, r_f, bpy)),
-                    ("반반: EMA + 볼벤필터3/1.5", blend(r_base, r_f3, bpy))]
-            t = table(rows, f"{interval} {title}")
-            print(t)
-            if title == "전체 기간":
-                report.append(t)
-    tg_send(f"<b>🧪 볼벤 + EMA 추세필터 — {SYMBOL}</b>\n<pre>{''.join(report)}</pre>")
+    for title, a, b in (("전체 기간", first, len(bars)), ("앞 절반", first, mid), ("뒤 절반", mid, len(bars))):
+        t = table([(n, run(bars, p, a, b, bpy)) for n, p in combos], f"4h {title}")
+        print(t)
+        report.append(t)
+    tg_send(f"<b>🧪 EMA 20/200 + 보조지표 8종 — {SYMBOL} 4h</b>\n<pre>{report[0]}</pre>")
