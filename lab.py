@@ -6,7 +6,9 @@ Golden Trend 개선 실험실 — 데이터 1개(기본 BTCUSDT 4시간봉)로 �
   adx   : 추세 강도 필터 — ADX(14)가 기준 이상일 때만 진입 (횡보장 거르기)
   vol   : 거래량 필터 — 진입 봉 거래량이 20봉 평균의 1.5배 이상일 때만
   atr   : 청산 보완 — 보유 중 최고 종가에서 ATR(14)×배수 만큼 빠지면 데드크로스 전이라도 청산
-  reent : atr로 청산된 뒤 50선이 여전히 200선 위면 다시 진입 허용 (기본은 새 골든크로스까지 대기)
+  reent : 청산된 뒤 50선이 여전히 200선 위면 다시 진입 허용 (기본은 새 골든크로스까지 대기)
+  exit_fast : 종가가 단기선 아래로 N봉 연속이면 청산 (데드크로스보다 빠른 청산)
+  fast/slow : 이동평균 길이 바꿔 보기 (20/100, 30/150)
 앞 절반 / 뒤 절반 기간을 따로 보여서, 앞에서 좋은 조합이 뒤에서도 좋은지(과최적화 여부) 확인
 
 실행: python3 lab.py [SYMBOL] [YEARS]   예) python3 lab.py BTCUSDT 3
@@ -96,9 +98,12 @@ def atr_adx(bars, n=14):
 
 
 # ───────── 백테스트 ─────────
-def run(bars, ind, start, end, adx_min=0, vol_x=0, atr_mult=0, reentry=False):
-    """bars[start:end] 구간에서 거래. 거래 목록과 성과를 돌려줌"""
-    f, s, adx, atr, vavg = ind["f"], ind["s"], ind["adx"], ind["atr"], ind["vavg"]
+def run(bars, ind, start, end, adx_min=0, vol_x=0, atr_mult=0, reentry=False, fast=FAST, slow=SLOW, exit_fast=0):
+    """bars[start:end] 구간에서 거래. 거래 목록과 성과를 돌려줌
+    exit_fast=N : 종가가 단기선 아래로 N봉 연속 내려가면 청산 (데드크로스보다 빠른 청산)"""
+    f, s = ind["sma"][fast], ind["sma"][slow]
+    adx, atr, vavg = ind["adx"], ind["atr"], ind["vavg"]
+    below = 0
     trades, pos, peak, armed = [], None, None, True     # armed: 새 골든크로스 이후 진입 가능 상태
     equity, eq_peak, mdd = 1.0, 1.0, 0.0
     for i in range(start, end - 1):
@@ -119,7 +124,8 @@ def run(bars, ind, start, end, adx_min=0, vol_x=0, atr_mult=0, reentry=False):
                     armed = False
         else:
             peak = max(peak, bars[i]["c"])
-            stop = atr_mult and atr[i] and bars[i]["c"] < peak - atr_mult * atr[i]
+            below = below + 1 if bars[i]["c"] < f[i] else 0
+            stop = (atr_mult and atr[i] and bars[i]["c"] < peak - atr_mult * atr[i]) or (exit_fast and below >= exit_fast)
             if not up or stop:
                 px = bars[i + 1]["o"]
                 ret = px / pos[1] - 1 - COST
@@ -148,16 +154,19 @@ def summary(trades, total, hold, mdd):
 
 
 VARIANTS = [
-    ("v1 기본",            {}),
-    ("ADX≥20",             {"adx_min": 20}),
-    ("ADX≥25",             {"adx_min": 25}),
-    ("거래량 1.5배",        {"vol_x": 1.5}),
-    ("ATR×3 추적청산",      {"atr_mult": 3}),
-    ("ATR×3 + 재진입",      {"atr_mult": 3, "reentry": True}),
-    ("ADX20 + ATR3",        {"adx_min": 20, "atr_mult": 3}),
-    ("ADX20 + ATR3 + 재진입", {"adx_min": 20, "atr_mult": 3, "reentry": True}),
-    ("ADX20 + 거래량",       {"adx_min": 20, "vol_x": 1.5}),
-    ("ADX20 + 거래량 + ATR3", {"adx_min": 20, "vol_x": 1.5, "atr_mult": 3}),
+    # 1차 실험(BTC 3년): ADX·거래량 필터는 효과 없음, ATR×3 추적청산은 MDD를 반으로 줄이지만 너무 일찍 나가서 수익도 깎임
+    ("v1 기본 50/200",       {}),
+    ("ATR×4 추적청산",       {"atr_mult": 4}),
+    ("ATR×5 추적청산",       {"atr_mult": 5}),
+    ("ATR×6 추적청산",       {"atr_mult": 6}),
+    ("ATR×8 추적청산",       {"atr_mult": 8}),
+    ("ATR×5 + 재진입",       {"atr_mult": 5, "reentry": True}),
+    ("50선 이탈 2봉 청산",     {"exit_fast": 2}),
+    ("50선 이탈 2봉 + 재진입", {"exit_fast": 2, "reentry": True}),
+    ("50선 이탈 3봉 + 재진입", {"exit_fast": 3, "reentry": True}),
+    ("v1 20/100",           {"fast": 20, "slow": 100}),
+    ("v1 30/150",           {"fast": 30, "slow": 150}),
+    ("30/150 + ATR×5",      {"fast": 30, "slow": 150, "atr_mult": 5}),
 ]
 
 
@@ -182,7 +191,8 @@ if __name__ == "__main__":
     bars = klines(SYMBOL, YEARS)
     closes = [b["c"] for b in bars]
     atr, adx = atr_adx(bars)
-    ind = {"f": sma(closes, FAST), "s": sma(closes, SLOW), "atr": atr, "adx": adx, "vavg": sma([b["v"] for b in bars], 20)}
+    lens = {n for _, kw in VARIANTS for n in (kw.get("fast", FAST), kw.get("slow", SLOW))}
+    ind = {"sma": {n: sma(closes, n) for n in lens}, "atr": atr, "adx": adx, "vavg": sma([b["v"] for b in bars], 20)}
     first = SLOW + 1
     mid = (first + len(bars)) // 2
     d = lambda i: datetime.fromtimestamp(bars[i]["t"] / 1000, tz=KST).strftime("%Y-%m-%d")
