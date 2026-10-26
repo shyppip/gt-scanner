@@ -2,14 +2,15 @@
 Golden Trend 개선 실험실 — 데이터 1개(기본 BTCUSDT 4시간봉)로 규칙 변형을 비교
 
 현재 기준(GT1-S): SMA20이 SMA200 위면 보유, 아래면 청산 (봉 마감 후 다음 봉 시가 체결)
-지난 실험에서 버린 것: ADX·거래량 필터(효과 없음), ATR 추적손절·단기선 이탈 청산(수익 깎음)
+지난 실험에서 버린 것: ADX·거래량 필터(효과 없음), ATR 추적손절·단기선 이탈 청산(수익 깎음),
+  롱숏(낙폭 45%), 변동성 비중 조절(수익만 줄어듦), 점수제 비중(잦은 매매로 손해), 종가>200선(잦은 매매)
+4차 결과: EMA 20/200이 SMA보다 낙폭이 작음 → 주변 길이도 좋은지 확인 중
 
 각 규칙은 "봉마다 비중"(-1 ~ 1)을 정함. 봉 i 마감에 정한 비중은 i+1 시가부터 적용.
 비중이 바뀐 만큼 편도 비용(0.1%)을 뗌. 앞 절반 / 뒤 절반을 따로 보여 과최적화 여부 확인.
 
 실행: python3 lab.py [SYMBOL] [YEARS]   예) python3 lab.py BTCUSDT 3
 """
-import math
 import os
 import sys
 import time
@@ -19,7 +20,7 @@ import requests
 
 SYMBOL = sys.argv[1] if len(sys.argv) > 1 else "BTCUSDT"
 YEARS = float(sys.argv[2]) if len(sys.argv) > 2 else 3
-WARMUP = 210
+WARMUP = 260
 SIDE_COST = 0.001                 # 편도 0.1% (수수료+슬리피지)
 BARS_PER_YEAR = 365 * 6
 KST = timezone(timedelta(hours=9))
@@ -70,52 +71,23 @@ def ema(vals, n):
     return out
 
 
-def realized_vol(closes, n=60):
-    """최근 n봉 수익률 표준편차를 연율화"""
-    out = [None] * len(closes)
-    rets = [0.0] + [math.log(closes[i] / closes[i - 1]) for i in range(1, len(closes))]
-    for i in range(n, len(closes)):
-        w = rets[i - n + 1:i + 1]
-        m = sum(w) / n
-        out[i] = math.sqrt(sum((x - m) ** 2 for x in w) / (n - 1) * BARS_PER_YEAR)
-    return out
-
-
 # ───────── 규칙: 봉마다 목표 비중 ─────────
-def cross_state(f, s, short=False):
-    return [None if a is None or b is None else (1.0 if a > b else (-1.0 if short else 0.0)) for a, b in zip(f, s)]
-
-
-def vol_target(base, vol, target):
-    return [None if b is None or v is None else b * min(1.0, target / v) for b, v in zip(base, vol)]
-
-
-def score3(c, s20, s50, s200):
-    """3가지 조건 점수 → 비중 0 / 33 / 67 / 100%: 20>200, 종가>50, 50선 상승"""
-    out = [None] * len(c)
-    for i in range(6, len(c)):
-        if None in (s20[i], s200[i], s50[i], s50[i - 6]):
-            continue
-        out[i] = ((s20[i] > s200[i]) + (c[i] > s50[i]) + (s50[i] > s50[i - 6])) / 3
-    return out
+def cross_state(f, s):
+    return [None if a is None or b is None else (1.0 if a > b else 0.0) for a, b in zip(f, s)]
 
 
 def build(bars):
     c = [b["c"] for b in bars]
-    S = {n: sma(c, n) for n in (20, 50, 100, 200)}
-    E = {n: ema(c, n) for n in (20, 50, 100, 200)}
-    vol = realized_vol(c)
-    base = cross_state(S[20], S[200])
+    S = {n: sma(c, n) for n in (20, 200)}
+    E = {n: ema(c, n) for n in (15, 20, 25, 30, 170, 200, 250)}
     return [
-        ("SMA 20/200 (현재)", base),
+        ("SMA 20/200 (현재)", cross_state(S[20], S[200])),
         ("EMA 20/200", cross_state(E[20], E[200])),
-        ("EMA 50/200", cross_state(E[50], E[200])),
-        ("EMA 20/100", cross_state(E[20], E[100])),
-        ("종가>SMA200", cross_state(c, S[200])),
-        ("롱숏 SMA 20/200", cross_state(S[20], S[200], short=True)),
-        ("20/200 변동성 60%", vol_target(base, vol, 0.60)),
-        ("20/200 변동성 40%", vol_target(base, vol, 0.40)),
-        ("점수제 3조건", score3(c, S[20], S[50], S[200])),
+        ("EMA 15/200", cross_state(E[15], E[200])),
+        ("EMA 25/200", cross_state(E[25], E[200])),
+        ("EMA 30/200", cross_state(E[30], E[200])),
+        ("EMA 20/170", cross_state(E[20], E[170])),
+        ("EMA 20/250", cross_state(E[20], E[250])),
     ]
 
 
@@ -125,8 +97,6 @@ def run(bars, pos, a, b):
     eq, peak, mdd, cur, held, changes, entries = 1.0, 1.0, 0.0, 0.0, 0, 0, 0
     for i in range(a, b - 2):
         tgt = pos[i] if pos[i] is not None else 0.0
-        if tgt != 0 and cur != 0 and tgt * cur > 0 and abs(tgt - cur) < 0.1:
-            tgt = cur                       # 10%p 미만 비중 조정은 생략 (비용 절약)
         if abs(tgt - cur) > 1e-9:
             eq *= 1 - SIDE_COST * abs(tgt - cur)
             changes += 1
