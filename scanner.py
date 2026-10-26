@@ -633,10 +633,10 @@ def run_auto():
     """15분마다 실행: 한 통으로 묶어서 보냄 (UTC 기준으로 할 일 결정)"""
     started = datetime.now(KST)
     now = datetime.now(timezone.utc)
-    # 매시 03분 실행 = 본 검사, 18·33·48분 = 15분봉만.
+    # 매시 00분 실행 = 본 검사, 15·30·45분 = 15분봉만.
     # 예약 실행이 몇 분 늦게 돌아도 헷갈리지 않게, 어떤 예약으로 실행됐는지(GT_SCHEDULE)를 먼저 봄
     sched = os.environ.get("GT_SCHEDULE", "")
-    main_slot = sched.startswith("3 ") if sched else now.minute < 15
+    main_slot = sched.startswith("0 ") if sched else now.minute < 15
     hour = now.hour
     if main_slot and hour in (0, 15):              # KST 09시·00시
         run_report()
