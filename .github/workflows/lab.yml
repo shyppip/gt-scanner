@@ -1,0 +1,27 @@
+name: Golden Trend 실험실
+
+on:
+  workflow_dispatch:        # 수동 실행 전용
+    inputs:
+      symbol:
+        description: "바이낸스 심볼 (예: BTCUSDT, SOLUSDT)"
+        default: "BTCUSDT"
+      years:
+        description: "최근 몇 년"
+        default: "3"
+
+permissions:
+  contents: read
+
+jobs:
+  lab:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 -m pip install -q requests
+      - name: 실험 실행
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python3 lab.py "${{ github.event.inputs.symbol }}" "${{ github.event.inputs.years }}"
