@@ -3,11 +3,11 @@ name: Golden Trend 스캔
 on:
   schedule:
     # 15분마다 15분봉 추세전환 검사 (항상)
-    #   03분 실행 = 본 검사: + KST 09:03·00:03 정기 리포트, + KST 13·17·21·01·05시 4시간봉 검사
-    #   18·33·48분 실행 = 15분봉만
+    #   00분 실행 = 본 검사: + KST 09:00·00:00 정기 리포트, + KST 13·17·21·01·05시 4시간봉 검사
+    #   15·30·45분 실행 = 15분봉만
     # (공개 저장소라 GitHub Actions 사용 시간 제한 없음)
-    - cron: "3 * * * *"
-    - cron: "18,33,48 * * * *"
+    - cron: "0 * * * *"
+    - cron: "15,30,45 * * * *"
   workflow_dispatch:        # Actions 화면의 'Run workflow' 버튼으로 바로 실행
     inputs:
       mode:
@@ -47,6 +47,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if [ "$(date -u +%H)" = "00" ] && [ "${{ github.event.schedule }}" = "3 * * * *" ]; then
+          if [ "$(date -u +%H)" = "00" ] && [ "${{ github.event.schedule }}" = "0 * * * *" ]; then
             gh api -X PUT "repos/${{ github.repository }}/actions/workflows/scan.yml/enable" || true
           fi
