@@ -80,6 +80,7 @@ def cross_state(f, s):
 def run(bars, pos, a, b, bpy):
     """비중 방식 백테스트. pos[i] = 봉 i 마감에 정한 비중 → i+1 시가부터 적용"""
     eq, peak, mdd, cur, entries = 1.0, 1.0, 0.0, 0.0, 0
+    curve = []
     for i in range(a, b - 2):
         tgt = pos[i] if pos[i] is not None else 0.0
         if abs(tgt - cur) > 1e-9:
@@ -87,16 +88,18 @@ def run(bars, pos, a, b, bpy):
             entries += cur == 0 and tgt != 0
             cur = tgt
         eq *= 1 + cur * (bars[i + 2]["o"] / bars[i + 1]["o"] - 1)
+        curve.append(eq)
         peak = max(peak, eq)
         mdd = max(mdd, 1 - eq / peak)
     yrs = (b - 2 - a) / bpy
     cagr = eq ** (1 / yrs) - 1 if eq > 0 else -1
     return {"n": entries, "win": None, "pf": None, "total": (eq - 1) * 100, "mdd": mdd * 100,
-            "calmar": cagr / mdd if mdd else 0, "hold": (bars[b - 1]["o"] / bars[a + 1]["o"] - 1) * 100}
+            "calmar": cagr / mdd if mdd else 0, "hold": (bars[b - 1]["o"] / bars[a + 1]["o"] - 1) * 100,
+            "curve": curve}
 
 
 # ───────── 볼벤v1: 스퀴즈 모멘텀 (볼린저 20,2 / 켈트너 20,1.5 TR / MACD 12,26,9) ─────────
-def squeeze_signals(bars, bb_len=20, bb_mult=2.0, kc_len=20, kc_mult=1.5):
+def squeeze_signals(bars, bb_len=20, bb_mult=2.0, kc_len=20, kc_mult=1.5, trend=None):
     c = [b["c"] for b in bars]
     basis = sma(c, bb_len)
     dev = [None] * len(c)
@@ -125,6 +128,8 @@ def squeeze_signals(bars, bb_len=20, bb_mult=2.0, kc_len=20, kc_mult=1.5):
     for i in range(1, len(c)):
         if on[i - 1] and on[i] is False and hist[i] is not None:
             out[i] = 1 if hist[i] > 0 else (-1 if hist[i] < 0 else 0)
+            if trend is not None and out[i] > 0 and trend[i] != 1.0:
+                out[i] = 0                                   # 추세 필터: EMA 단기선이 장기선 위일 때만 롱
     return out
 
 
@@ -134,7 +139,7 @@ def run_squeeze(bars, sigs, a, b, bpy, tp=2.0, sl=1.0, long_only=False):
     반대 신호가 나오면 다음 봉 시가에 뒤집기. 매 거래 자산 100% 복리, 편도 비용 SIDE_COST."""
     eq, peak, mdd = 1.0, 1.0, 0.0
     side, entry, armed_from = 0, 0.0, None
-    trades, pending = [], 0
+    trades, pending, curve = [], 0, []
 
     def close_at(px):
         nonlocal eq, side
@@ -170,6 +175,7 @@ def run_squeeze(bars, sigs, a, b, bpy, tp=2.0, sl=1.0, long_only=False):
         if s and not (long_only and s < 0) and s != side and i < b - 1:
             pending = s
         cur = eq * (1 + side * (bar["c"] / entry - 1)) if side else eq
+        curve.append(cur)
         peak = max(peak, cur)
         mdd = max(mdd, 1 - cur / peak)
     if side:
@@ -180,7 +186,21 @@ def run_squeeze(bars, sigs, a, b, bpy, tp=2.0, sl=1.0, long_only=False):
     cagr = eq ** (1 / yrs) - 1 if eq > 0 else -1
     return {"n": len(trades), "win": len(w) / len(trades) * 100 if trades else 0,
             "pf": sum(w) / sum(l) if l else float("inf"), "total": (eq - 1) * 100, "mdd": mdd * 100,
-            "calmar": cagr / mdd if mdd else 0, "hold": (bars[b - 1]["c"] / bars[a]["o"] - 1) * 100}
+            "calmar": cagr / mdd if mdd else 0, "hold": (bars[b - 1]["c"] / bars[a]["o"] - 1) * 100,
+            "curve": curve}
+
+
+def blend(r1, r2, bpy, w=0.5):
+    """자금을 w : 1-w 로 나눠 두 전략을 동시에 운용(중간 재조정 없음)"""
+    n = min(len(r1["curve"]), len(r2["curve"]))
+    eq, peak, mdd = 1.0, 1.0, 0.0
+    for k in range(n):
+        eq = w * r1["curve"][k] + (1 - w) * r2["curve"][k]
+        peak = max(peak, eq)
+        mdd = max(mdd, 1 - eq / peak)
+    cagr = eq ** (bpy / n) - 1 if eq > 0 else -1
+    return {"n": r1["n"] + r2["n"], "win": None, "pf": None, "total": (eq - 1) * 100, "mdd": mdd * 100,
+            "calmar": cagr / mdd if mdd else 0, "hold": r1["hold"]}
 
 
 def table(rows, title):
@@ -201,32 +221,33 @@ def tg_send(text):
                   json={"chat_id": TG_CHAT, "text": text[:3900], "parse_mode": "HTML", "disable_web_page_preview": True}, timeout=20)
 
 
-VARIANTS = [   # (이름, 익절%, 손절%, 롱만)
-    ("볼벤v1 원본 2%/1% 롱숏", 2.0, 1.0, False),
-    ("볼벤v1 2%/1% 롱만", 2.0, 1.0, True),
-    ("볼벤v1 4%/2% 롱숏", 4.0, 2.0, False),
-    ("볼벤v1 6%/3% 롱숏", 6.0, 3.0, False),
-]
-
-
 if __name__ == "__main__":
     d = lambda bars, i: datetime.fromtimestamp(bars[i]["t"] / 1000, tz=KST).strftime("%Y-%m-%d")
     report = []
-    for interval, yrs in (("4h", YEARS), ("1h", YEARS), ("15m", min(YEARS, 1))):
+    for interval, yrs in (("4h", YEARS), ("1h", YEARS)):
         bars = klines(SYMBOL, yrs, interval)
-        bpy = 365 * {"15m": 96, "1h": 24, "4h": 6}[interval]
+        bpy = 365 * {"1h": 24, "4h": 6}[interval]
         c = [b["c"] for b in bars]
         base = cross_state(ema(c, 20), ema(c, 200))
-        sigs = squeeze_signals(bars)
+        raw = squeeze_signals(bars)
+        filt = squeeze_signals(bars, trend=base)
         first = WARMUP
         mid = (first + len(bars)) // 2
         print(f"\n######## {SYMBOL} {interval} {len(bars)}개 · {d(bars, first)} ~ {d(bars, len(bars) - 1)} (앞/뒤 경계 {d(bars, mid)}) · 편도비용 {SIDE_COST * 100:.1f}%")
-        print(f"스퀴즈 해제 신호: 롱 {sum(1 for s in sigs[first:] if s > 0)}번 / 숏 {sum(1 for s in sigs[first:] if s < 0)}번")
+        print(f"롱 신호: 필터 없음 {sum(1 for s in raw[first:] if s > 0)}번 / EMA20>200 필터 {sum(1 for s in filt[first:] if s > 0)}번")
         for title, a, b in (("전체 기간", first, len(bars)), ("앞 절반", first, mid), ("뒤 절반", mid, len(bars))):
-            rows = [("EMA 20/200 (현재 GT1-S)", run(bars, base, a, b, bpy))]
-            rows += [(n, run_squeeze(bars, sigs, a, b, bpy, tp, sl, lo)) for n, tp, sl, lo in VARIANTS]
+            r_base = run(bars, base, a, b, bpy)
+            r_raw = run_squeeze(bars, raw, a, b, bpy, 2.0, 1.0, True)
+            r_f = run_squeeze(bars, filt, a, b, bpy, 2.0, 1.0, True)
+            r_f3 = run_squeeze(bars, filt, a, b, bpy, 3.0, 1.5, True)
+            rows = [("EMA 20/200 (현재 GT1-S)", r_base),
+                    ("볼벤 롱만 2/1 필터없음", r_raw),
+                    ("볼벤 롱만 2/1 +EMA필터", r_f),
+                    ("볼벤 롱만 3/1.5 +EMA필터", r_f3),
+                    ("반반: EMA + 볼벤필터2/1", blend(r_base, r_f, bpy)),
+                    ("반반: EMA + 볼벤필터3/1.5", blend(r_base, r_f3, bpy))]
             t = table(rows, f"{interval} {title}")
             print(t)
             if title == "전체 기간":
                 report.append(t)
-    tg_send(f"<b>🧪 볼벤v1 백테스트 — {SYMBOL}</b>\n<pre>{''.join(report)}</pre>")
+    tg_send(f"<b>🧪 볼벤 + EMA 추세필터 — {SYMBOL}</b>\n<pre>{''.join(report)}</pre>")
