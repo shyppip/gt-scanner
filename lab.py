@@ -418,29 +418,20 @@ def obv_divergence(bars, n=20, look=30):
 
 
 def build_combos(bars):
-    """6차: 매집(거래량) 신호를 현재 규칙(EMA 20/200 + MACD>0 & 일목 진입)에 더하거나 바꿔 끼워 비교"""
+    """7차: 6차에서 OBV 다이버전스(매집 흔적)만 앞/뒤 절반 모두 개선(OBV>평균·A/D·CMF·상승봉거래량은 효과 없음)
+    → 설정값(신고가 기간 n, 유효기간 look) 주변도 좋은지 확인"""
     c = [b["c"] for b in bars]
     up = cross_state(ema(c, 20), ema(c, 200))
     ICH = ichimoku_above(bars)
     M = macd_hist(c)
     base = lambda i: M[i] is not None and M[i] > 0 and ICH[i]
-    O = obv(bars); OE = ema(O, 20)
-    AD = ad_line(bars); ADE = ema(AD, 20)
-    CM = cmf(bars, 20)
-    UD = updown_vol(bars, 20)
-    DV = obv_divergence(bars, 20, 30)
-    f = {
-        "OBV>평균": lambda i: OE[i] is not None and O[i] > OE[i],
-        "A/D>평균": lambda i: ADE[i] is not None and AD[i] > ADE[i],
-        "CMF>0": lambda i: CM[i] is not None and CM[i] > 0,
-        "상승봉거래량>하락": lambda i: UD[i] is not None and UD[i] > 1,
-        "OBV다이버전스": lambda i: DV[i],
-    }
-    rows = [("EMA만 (필터 없음)", up), ("현재(MACD&일목)", combine(up, entry_ok=base))]
-    for k, g in f.items():
-        rows.append(("현재+" + k, combine(up, entry_ok=lambda i, g=g: base(i) and g(i))))
-    for k, g in f.items():
-        rows.append(("EMA+" + k + "만", combine(up, entry_ok=g)))
+    rows = [("EMA만", up), ("현재(MACD&일목)", combine(up, entry_ok=base))]
+    for n, look in ((20, 30), (10, 30), (40, 30), (20, 15), (20, 60), (30, 45)):
+        DV = obv_divergence(bars, n, look)
+        rows.append((f"현재+OBV다이버({n},{look})", combine(up, entry_ok=lambda i, DV=DV: base(i) and DV[i])))
+    for n, look in ((20, 30), (10, 30), (40, 30), (20, 60)):
+        DV = obv_divergence(bars, n, look)
+        rows.append((f"EMA+OBV다이버({n},{look})만", combine(up, entry_ok=lambda i, DV=DV: DV[i])))
     return rows
 
 
