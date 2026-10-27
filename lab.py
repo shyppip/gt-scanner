@@ -418,21 +418,20 @@ def obv_divergence(bars, n=20, look=30):
 
 
 def build_combos(bars):
-    """7차: 6차에서 OBV 다이버전스(매집 흔적)만 앞/뒤 절반 모두 개선(OBV>평균·A/D·CMF·상승봉거래량은 효과 없음)
-    → 설정값(신고가 기간 n, 유효기간 look) 주변도 좋은지 확인"""
+    """블로그 시리즈용 정리표: 처음(SMA 50/200)부터 지금 규칙까지 같은 조건으로 한 번에 비교"""
     c = [b["c"] for b in bars]
-    up = cross_state(ema(c, 20), ema(c, 200))
     ICH = ichimoku_above(bars)
     M = macd_hist(c)
-    base = lambda i: M[i] is not None and M[i] > 0 and ICH[i]
-    rows = [("EMA만", up), ("현재(MACD&일목)", combine(up, entry_ok=base))]
-    for n, look in ((20, 30), (10, 30), (40, 30), (20, 15), (20, 60), (30, 45)):
-        DV = obv_divergence(bars, n, look)
-        rows.append((f"현재+OBV다이버({n},{look})", combine(up, entry_ok=lambda i, DV=DV: base(i) and DV[i])))
-    for n, look in ((20, 30), (10, 30), (40, 30), (20, 60)):
-        DV = obv_divergence(bars, n, look)
-        rows.append((f"EMA+OBV다이버({n},{look})만", combine(up, entry_ok=lambda i, DV=DV: DV[i])))
-    return rows
+    upE = cross_state(ema(c, 20), ema(c, 200))
+    return [
+        ("SMA 50/200 (처음)", cross_state(sma(c, 50), sma(c, 200))),
+        ("SMA 20/200", cross_state(sma(c, 20), sma(c, 200))),
+        ("EMA 50/200", cross_state(ema(c, 50), ema(c, 200))),
+        ("EMA 20/200", upE),
+        ("EMA20/200+MACD", combine(upE, entry_ok=lambda i: M[i] is not None and M[i] > 0)),
+        ("EMA20/200+일목", combine(upE, entry_ok=lambda i: ICH[i])),
+        ("EMA20/200+MACD&일목(현재)", combine(upE, entry_ok=lambda i: M[i] is not None and M[i] > 0 and ICH[i])),
+    ]
 
 
 if __name__ == "__main__":
@@ -448,4 +447,4 @@ if __name__ == "__main__":
         t = table([(n, run(bars, p, a, b, bpy)) for n, p in combos], f"4h {title}")
         print(t)
         report.append(t)
-    tg_send(f"<b>🧪 GT + 매집(거래량) 신호 — {SYMBOL} 4h</b>\n<pre>{report[0]}</pre>")
+    tg_send(f"<b>🧪 GT 변천사 정리표 — {SYMBOL} 4h</b>\n<pre>{report[0]}</pre>")
