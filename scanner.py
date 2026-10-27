@@ -2,7 +2,8 @@
 Golden Trend 매수신호 스캐너 (업비트 원화마켓 + 바이낸스 USDT 마켓)
 
 규칙 (트레이딩뷰 Golden Trend 지표와 동일)
-- 50봉 단순이동평균(SMA)이 200봉 SMA를 아래에서 위로 돌파 = 매수 신호
+- 20봉 지수이동평균(EMA)이 200봉 EMA 위로 올라간 상승 구간에서, MACD 히스토그램 > 0 그리고 종가 > 일목 구름이 처음 맞는 봉 = 매수 신호
+  (트레이딩뷰 GT1-S·GT2 올인원과 같은 규칙, 2026-10-27 변경. 청산은 20선이 200선 아래로)
 - 확정된 봉(마감된 봉)에서만 판단. 진행 중인 봉은 쓰지 않음
 
 실행 방법
@@ -29,13 +30,13 @@ import requests
 TG_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TG_CHAT = os.environ.get("TELEGRAM_CHAT_ID", "")
 INTERVAL = os.environ.get("GT_INTERVAL", "4h")          # 기본 검사 봉: 4h / 1h / 15m / 1d
-FAST = int(os.environ.get("GT_FAST", "50"))
+FAST = int(os.environ.get("GT_FAST", "20"))
 SLOW = int(os.environ.get("GT_SLOW", "200"))
 SELL_ALERTS = os.environ.get("GT_SELL_ALERTS", "false").lower() == "true"  # 데드크로스(청산)도 받을지
 EXCHANGES = os.environ.get("GT_EXCHANGES", "upbit,binance").split(",")
 HEARTBEAT = os.environ.get("GT_HEARTBEAT", "true").lower() == "true"     # 소식 없어도 매시간 한 통 보내기
 DRY_RUN = os.environ.get("GT_DRY_RUN", "false").lower() == "true"         # 텔레그램 대신 화면에만 출력
-NEAR_GAP = float(os.environ.get("GT_NEAR_GAP", "1.5"))     # 임박 목록: 50선이 200선 아래 몇 % 이내
+NEAR_GAP = float(os.environ.get("GT_NEAR_GAP", "1.5"))     # 임박 목록: 20선이 200선 아래 몇 % 이내
 NEAR_BARS = int(os.environ.get("GT_NEAR_BARS", "12"))      # 임박 목록: 지금 속도면 몇 봉 안에 닿을지
 NEAR_MAX = int(os.environ.get("GT_NEAR_MAX", "10"))        # 임박 목록: 거래소별 최대 개수
 TREND_TOP = int(os.environ.get("GT_TREND_TOP", "120"))     # 15분봉 추세전환 검사: 거래대금 상위 몇 개까지 (거래소별)
@@ -45,7 +46,7 @@ MIDDLE = int(os.environ.get("GT_MIDDLE", "50"))            # 신호 강도 🟡 
 
 KST = timezone(timedelta(hours=9))
 UA = {"User-Agent": "golden-trend-scanner/1.1"}
-NEED = SLOW + 1          # 교차 판단에 필요한 마감봉 수 (직전봉 SMA200 + 현재봉 SMA200)
+NEED = SLOW * 2          # EMA200이 트레이딩뷰 값과 거의 같아지려면 400봉 이상 필요
 
 UPBIT_UNIT = {"1m": "minutes/1", "15m": "minutes/15", "1h": "minutes/60", "4h": "minutes/240", "1d": "days"}
 INTERVAL_SEC = {"1m": 60, "15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}
@@ -97,9 +98,37 @@ def get(url, params=None, tries=4):
     return None
 
 
-def sma(vals, n, end):
-    """vals[end-n:end] 평균"""
-    return sum(vals[end - n:end]) / n
+def ema_list(vals, n):
+    """트레이딩뷰 ta.ema와 같은 지수이동평균 (첫 값에서 시작)"""
+    out, k, e = [], 2 / (n + 1), None
+    for v in vals:
+        e = v if e is None else e + k * (v - e)
+        out.append(e)
+    return out
+
+
+class Bars(list):
+    """종가 목록 + 고가·저가 (일목 구름 계산용)"""
+    highs = lows = None
+
+
+def buy_filter_ok(closes):
+    """매수 필터 ok(i): 봉 i에서 [MACD(12,26,9) 히스토그램 > 0 그리고 종가 > 일목 구름]. 고가·저가가 없으면 MACD만"""
+    m = [x - y for x, y in zip(ema_list(closes, 12), ema_list(closes, 26))]
+    hist = [x - y for x, y in zip(m, ema_list(m, 9))]
+    hs, ls = getattr(closes, "highs", None), getattr(closes, "lows", None)
+
+    def ok(i):
+        if hist[i] <= 0:
+            return False
+        if not (hs and ls):
+            return True
+        j = i - 25                                       # 구름은 25봉 앞으로 그려짐
+        if j < 51:
+            return False
+        mid = lambda n: (max(hs[j - n + 1:j + 1]) + min(ls[j - n + 1:j + 1])) / 2
+        return closes[i] > max((mid(9) + mid(26)) / 2, mid(52))
+    return ok
 
 
 def rsi(closes, n=14):
@@ -119,15 +148,22 @@ def analyze(closes, vols=None):
     if len(closes) < NEED:
         return None
     L = len(closes)
-    f_now, s_now = sma(closes, FAST, L), sma(closes, SLOW, L)
-    f_prev, s_prev = sma(closes, FAST, L - 1), sma(closes, SLOW, L - 1)
+    EF, ES = ema_list(closes, FAST), ema_list(closes, SLOW)
+    f_now, s_now, f_prev, s_prev = EF[-1], ES[-1], EF[-2], ES[-2]
     sig = None
-    if f_prev <= s_prev and f_now > s_now:
-        sig = "buy"
+    if f_now > s_now:
+        # 상승 구간에서 매수 필터가 처음 맞는 봉 = 매수 (GT1-S와 같음)
+        ok = buy_filter_ok(closes)
+        if ok(L - 1):
+            j = L - 2
+            while j >= SLOW and EF[j] > ES[j] and not ok(j):
+                j -= 1
+            if j < SLOW or not (EF[j] > ES[j]):
+                sig = "buy"
     elif f_prev >= s_prev and f_now < s_now:
         sig = "sell"
     gap = (f_now / s_now - 1) * 100
-    closing = (f_now - f_prev) - (s_now - s_prev)     # 한 봉 동안 두 선 간격이 좁혀진 양 (+면 50선이 따라붙는 중)
+    closing = (f_now - f_prev) - (s_now - s_prev)     # 한 봉 동안 두 선 간격이 좁혀진 양 (+면 20선이 따라붙는 중)
     eta = (s_now - f_now) / closing if (f_now < s_now and closing > 0) else None
     vol_x = None
     if vols and len(vols) >= 21:
@@ -138,7 +174,7 @@ def analyze(closes, vols=None):
 
 
 def light(a):
-    """한 봉 기준 신호등: 🟢 50선이 200선 위 / 🟡 아래지만 교차 임박 / 🔴 아래 / ⚪ 데이터 부족"""
+    """한 봉 기준 신호등: 🟢 20선이 200선 위 / 🟡 아래지만 교차 임박 / 🔴 아래 / ⚪ 데이터 부족"""
     if a is None:
         return "⚪"
     if a["fast"] > a["slow"]:
@@ -164,9 +200,13 @@ def upbit_closes(market, iv):
     """마감된 봉만, 오래된 → 최근 순. 업비트는 한 번에 200개까지라 두 번 나눠 받음."""
     url = f"https://api.upbit.com/v1/candles/{UPBIT_UNIT[iv]}"
     rows = get(url, {"market": market, "count": 200}) or []
-    if len(rows) == 200:
-        last_utc = rows[-1]["candle_date_time_utc"]
-        rows += get(url, {"market": market, "count": 200, "to": last_utc + "Z"}) or []
+    for _ in range(2):                                   # EMA200 정확도를 위해 최대 600봉
+        if len(rows) % 200 or not rows:
+            break
+        more = get(url, {"market": market, "count": 200, "to": rows[-1]["candle_date_time_utc"] + "Z"}) or []
+        if not more:
+            break
+        rows += more
     now = datetime.now(timezone.utc)
     sec = INTERVAL_SEC[iv]
     closed, seen = [], set()
@@ -177,9 +217,12 @@ def upbit_closes(market, iv):
         seen.add(t)
         start = datetime.fromisoformat(t).replace(tzinfo=timezone.utc)
         if start + timedelta(seconds=sec) <= now:      # 진행 중인 봉 제외
-            closed.append((start, float(r["trade_price"]), float(r["candle_acc_trade_volume"])))
+            closed.append((start, float(r["trade_price"]), float(r["candle_acc_trade_volume"]),
+                           float(r["high_price"]), float(r["low_price"])))
     closed.sort(key=lambda x: x[0])
-    return [c for _, c, _ in closed], [v for _, _, v in closed], (closed[-1][0] if closed else None)
+    cl = Bars(x[1] for x in closed)
+    cl.highs, cl.lows = [x[3] for x in closed], [x[4] for x in closed]
+    return cl, [x[2] for x in closed], (closed[-1][0] if closed else None)
 
 
 # ───────── 바이낸스 ─────────
@@ -215,10 +258,12 @@ def binance_markets():
 
 
 def binance_closes(symbol, iv):
-    rows = bn_get("/api/v3/klines", {"symbol": symbol, "interval": iv, "limit": NEED + 12})
+    rows = bn_get("/api/v3/klines", {"symbol": symbol, "interval": iv, "limit": 600})
     now_ms = time.time() * 1000
-    closed = [(int(r[0]), float(r[4]), float(r[5])) for r in rows if int(r[6]) < now_ms]  # r[6] = 마감 시각
-    return ([c for _, c, _ in closed], [v for _, _, v in closed],
+    closed = [(int(r[0]), float(r[4]), float(r[5]), float(r[2]), float(r[3])) for r in rows if int(r[6]) < now_ms]  # r[6] = 마감 시각
+    cl = Bars(x[1] for x in closed)
+    cl.highs, cl.lows = [x[3] for x in closed], [x[4] for x in closed]
+    return (cl, [x[2] for x in closed],
             datetime.fromtimestamp(closed[-1][0] / 1000, timezone.utc) if closed else None)
 
 
@@ -250,14 +295,15 @@ def trend_state(a):
 
 
 def recent_cross(closes, vols, lookback):
-    """최근 lookback봉 안에서 일어난 마지막 50/200 교차. (방향, 몇 봉 전, 교차봉 거래량 배수) 또는 None"""
+    """최근 lookback봉 안에서 일어난 마지막 20/200 EMA 교차. (방향, 몇 봉 전, 교차봉 거래량 배수) 또는 None"""
     L = len(closes)
     if L < NEED + lookback:
         return None
+    EF, ES = ema_list(closes, FAST), ema_list(closes, SLOW)
     for back in range(0, lookback):
         end = L - back
-        f_now, s_now = sma(closes, FAST, end), sma(closes, SLOW, end)
-        f_prev, s_prev = sma(closes, FAST, end - 1), sma(closes, SLOW, end - 1)
+        f_now, s_now = EF[end - 1], ES[end - 1]
+        f_prev, s_prev = EF[end - 2], ES[end - 2]
         if f_prev <= s_prev and f_now > s_now:
             d = "up"
         elif f_prev >= s_prev and f_now < s_now:
@@ -265,7 +311,7 @@ def recent_cross(closes, vols, lookback):
         else:
             continue
         # 교차 뒤 지금까지 같은 쪽을 유지하는지
-        held = (sma(closes, FAST, L) > sma(closes, SLOW, L)) == (d == "up")
+        held = (EF[-1] > ES[-1]) == (d == "up")
         base = sum(vols[end - 21:end - 1]) / 20 if vols and end >= 21 else 0
         vx = vols[end - 1] / base if base > 0 else None
         return {"dir": d, "back": back, "held": held, "vol_x": vx}
@@ -436,7 +482,7 @@ def enrich(results, iv, known):
 
 def strength(h, iv, lights):
     """신호 강도 (100점 만점 %)
-    일봉 추세 30 · 다른 봉 추세 20 · 거래량 20 · RSI 20 · 50선 상승+가격이 200선 위 10"""
+    일봉 추세 30 · 다른 봉 추세 20 · 거래량 20 · RSI 20 · 20선 상승+가격이 200선 위 10"""
     score, why = 0, []
     big = {"15m": "4h", "1h": "1d", "4h": "1d", "1d": "4h"}[iv]   # 더 큰 봉
     small = [tf for tf in TF_ORDER if tf not in (iv, big)][0]  # 나머지 봉
@@ -487,7 +533,7 @@ def strength(h, iv, lights):
 
 
 def market_light(res4):
-    """시장 신호등: 4시간봉 50선이 200선 위인 코인 비율 + 비트코인 4시간봉"""
+    """시장 신호등: 4시간봉 20선이 200선 위인 코인 비율 + 비트코인 4시간봉"""
     rows = [h for r in res4 for h in r["rows"]]
     if not rows:
         return None
