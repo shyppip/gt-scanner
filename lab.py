@@ -47,7 +47,7 @@ def klines(symbol, years, interval="4h"):
         if len(rows) < 1000:
             break
     out = sorted({r[0]: r for r in out}.values(), key=lambda r: r[0])[:-1]   # 진행 중 봉 제외
-    return [{"t": r[0], "o": float(r[1]), "h": float(r[2]), "l": float(r[3]), "c": float(r[4])} for r in out]
+    return [{"t": r[0], "o": float(r[1]), "h": float(r[2]), "l": float(r[3]), "c": float(r[4]), "v": float(r[5])} for r in out]
 
 
 
@@ -365,25 +365,83 @@ def combine(up, entry_ok=None, early_exit=None, reentry_ok=None):
     return pos
 
 
+# ───────── 매집(거래량) 지표 ─────────
+def obv(bars):
+    out, v = [0.0], 0.0
+    for i in range(1, len(bars)):
+        d = bars[i]["c"] - bars[i - 1]["c"]
+        v += bars[i]["v"] if d > 0 else -bars[i]["v"] if d < 0 else 0
+        out.append(v)
+    return out
+
+
+def ad_line(bars):
+    out, v = [], 0.0
+    for b in bars:
+        rng = b["h"] - b["l"]
+        v += ((b["c"] - b["l"]) - (b["h"] - b["c"])) / rng * b["v"] if rng > 0 else 0
+        out.append(v)
+    return out
+
+
+def cmf(bars, n=20):
+    mfv = [(((b["c"] - b["l"]) - (b["h"] - b["c"])) / (b["h"] - b["l"]) * b["v"]) if b["h"] > b["l"] else 0 for b in bars]
+    out = [None] * len(bars)
+    for i in range(n - 1, len(bars)):
+        vs = sum(b["v"] for b in bars[i - n + 1:i + 1])
+        out[i] = sum(mfv[i - n + 1:i + 1]) / vs if vs else 0
+    return out
+
+
+def updown_vol(bars, n=20):
+    """최근 n봉 중 오른 봉 거래량 합 / 내린 봉 거래량 합"""
+    out = [None] * len(bars)
+    for i in range(n, len(bars)):
+        u = sum(bars[j]["v"] for j in range(i - n + 1, i + 1) if bars[j]["c"] > bars[j - 1]["c"])
+        d = sum(bars[j]["v"] for j in range(i - n + 1, i + 1) if bars[j]["c"] < bars[j - 1]["c"])
+        out[i] = u / d if d else 9
+    return out
+
+
+def obv_divergence(bars, n=20, look=30):
+    """매집 흔적: OBV는 n봉 신고가인데 종가는 n봉 신고가가 아닌 봉이 최근 look봉 안에 있었는지"""
+    o, c = obv(bars), [b["c"] for b in bars]
+    hit = [False] * len(bars)
+    for i in range(n, len(bars)):
+        hit[i] = o[i] >= max(o[i - n + 1:i + 1]) and c[i] < max(c[i - n + 1:i + 1])
+    out, last = [False] * len(bars), -10 ** 9
+    for i in range(len(bars)):
+        if hit[i]:
+            last = i
+        out[i] = i - last <= look
+    return out
+
+
 def build_combos(bars):
-    """1차(8종) 결과: RSI·CCI 진입필터는 변화 없음, 슈퍼트렌드·PSAR·StochRSI·돈치안 조기청산/재진입은 효율 하락.
-    MACD>0·일목 구름위 진입필터만 앞/뒤 절반 모두 개선 → 2차: 설정값 주변·조합 확인"""
+    """6차: 매집(거래량) 신호를 현재 규칙(EMA 20/200 + MACD>0 & 일목 진입)에 더하거나 바꿔 끼워 비교"""
     c = [b["c"] for b in bars]
     up = cross_state(ema(c, 20), ema(c, 200))
     ICH = ichimoku_above(bars)
-    M = {k: macd_hist(c, *k) for k in ((12, 26, 9), (8, 21, 5), (19, 39, 9), (12, 26, 5), (12, 26, 15))}
-    mok = lambda k: (lambda i: M[k][i] is not None and M[k][i] > 0)
-    return [
-        ("EMA 20/200 (현재)", up),
-        ("+MACD(12,26,9)>0 진입", combine(up, entry_ok=mok((12, 26, 9)))),
-        ("+MACD(8,21,5)>0 진입", combine(up, entry_ok=mok((8, 21, 5)))),
-        ("+MACD(19,39,9)>0 진입", combine(up, entry_ok=mok((19, 39, 9)))),
-        ("+MACD(12,26,5)>0 진입", combine(up, entry_ok=mok((12, 26, 5)))),
-        ("+MACD(12,26,15)>0 진입", combine(up, entry_ok=mok((12, 26, 15)))),
-        ("+일목 구름위 진입", combine(up, entry_ok=lambda i: ICH[i])),
-        ("+MACD>0 & 일목 진입", combine(up, entry_ok=lambda i: mok((12, 26, 9))(i) and ICH[i])),
-        ("+MACD>0 또는 일목 진입", combine(up, entry_ok=lambda i: mok((12, 26, 9))(i) or ICH[i])),
-    ]
+    M = macd_hist(c)
+    base = lambda i: M[i] is not None and M[i] > 0 and ICH[i]
+    O = obv(bars); OE = ema(O, 20)
+    AD = ad_line(bars); ADE = ema(AD, 20)
+    CM = cmf(bars, 20)
+    UD = updown_vol(bars, 20)
+    DV = obv_divergence(bars, 20, 30)
+    f = {
+        "OBV>평균": lambda i: OE[i] is not None and O[i] > OE[i],
+        "A/D>평균": lambda i: ADE[i] is not None and AD[i] > ADE[i],
+        "CMF>0": lambda i: CM[i] is not None and CM[i] > 0,
+        "상승봉거래량>하락": lambda i: UD[i] is not None and UD[i] > 1,
+        "OBV다이버전스": lambda i: DV[i],
+    }
+    rows = [("EMA만 (필터 없음)", up), ("현재(MACD&일목)", combine(up, entry_ok=base))]
+    for k, g in f.items():
+        rows.append(("현재+" + k, combine(up, entry_ok=lambda i, g=g: base(i) and g(i))))
+    for k, g in f.items():
+        rows.append(("EMA+" + k + "만", combine(up, entry_ok=g)))
+    return rows
 
 
 if __name__ == "__main__":
@@ -399,4 +457,4 @@ if __name__ == "__main__":
         t = table([(n, run(bars, p, a, b, bpy)) for n, p in combos], f"4h {title}")
         print(t)
         report.append(t)
-    tg_send(f"<b>🧪 EMA 20/200 + 보조지표 8종 — {SYMBOL} 4h</b>\n<pre>{report[0]}</pre>")
+    tg_send(f"<b>🧪 GT + 매집(거래량) 신호 — {SYMBOL} 4h</b>\n<pre>{report[0]}</pre>")
