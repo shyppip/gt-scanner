@@ -320,6 +320,32 @@ def main():
         if votes:
             snap_date = max(votes, key=votes.get)
         status["snapshot_vote"] = votes
+    # 이미 저장된 스냅샷도 일봉과 대조해 날짜가 틀린 파일은 바로잡는다
+    sd = f"{OUT}/snapshots"
+    if os.path.isdir(sd):
+        for fn in sorted(os.listdir(sd)):
+            try:
+                rows = list(csv.DictReader(open(os.path.join(sd, fn), encoding="utf-8")))
+            except Exception:
+                continue
+            v = {}
+            for x in rows[:3000]:
+                h = hist.get(x.get("ticker"))
+                try:
+                    c0 = float(x.get("close"))
+                except Exception:
+                    continue
+                for d, *_, c, _v in (h or []):
+                    if abs(c - c0) < 0.006:
+                        v[d] = v.get(d, 0) + 1
+            if v:
+                best = max(v, key=v.get)
+                if best + ".csv" != fn:
+                    if os.path.exists(os.path.join(sd, best + ".csv")):
+                        os.remove(os.path.join(sd, fn))
+                    else:
+                        os.rename(os.path.join(sd, fn), os.path.join(sd, best + ".csv"))
+                    status.setdefault("snapshot_fixed", []).append(f"{fn}->{best}")
     if snap and snap_date:
         os.makedirs(f"{OUT}/snapshots", exist_ok=True)
         wcsv(f"{OUT}/snapshots/{snap_date}.csv", snap, ["ticker", "close", "chg_pct", "volume", "market_cap", "name"])
