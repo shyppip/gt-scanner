@@ -65,13 +65,14 @@ def universe():
         note("sp500_list", True)
     else:
         note("sp500_list", False)
-    r = get("https://en.wikipedia.org/wiki/Nasdaq-100")
-    if r:
-        m = re.findall(r"<td>([A-Z]{1,5})</td>\s*<td><a [^>]*>[^<]+</a>", r.text)
-        tk.update(m)
-        note("ndx_list", bool(m))
-    else:
-        note("ndx_list", False)
+    r = get("https://api.nasdaq.com/api/quote/list-type/nasdaq100",
+            headers={**UA, "Origin": "https://www.nasdaq.com", "Referer": "https://www.nasdaq.com/"})
+    try:
+        m = [x["symbol"].strip() for x in r.json()["data"]["data"]["rows"]]
+    except Exception:
+        m = []
+    tk.update(m)
+    note("ndx_list", len(m) > 50)
     if os.path.exists("watchlist.txt"):
         for line in open("watchlist.txt", encoding="utf-8"):
             t = line.split("#")[0].strip().upper()
@@ -305,16 +306,30 @@ def main():
 
     # 전 종목 스냅샷 (나스닥 스크리너는 직전 정규장 종가 기준)
     snap = snapshot()
+    snap_date = None
     if snap:
+        # 스크리너는 갱신이 늦을 수 있음 → 일봉 종가와 맞춰 실제 날짜를 찾는다
+        votes = {}
+        for x in snap:
+            rows = hist.get(x["ticker"])
+            if not rows or not x["close"] or x["close"] != x["close"]:
+                continue
+            for d, *_, c, _v in rows[-3:]:
+                if abs(c - x["close"]) < 0.006:
+                    votes[d] = votes.get(d, 0) + 1
+        if votes:
+            snap_date = max(votes, key=votes.get)
+        status["snapshot_vote"] = votes
+    if snap and snap_date:
         os.makedirs(f"{OUT}/snapshots", exist_ok=True)
-        wcsv(f"{OUT}/snapshots/{base_date}.csv", snap, ["ticker", "close", "chg_pct", "volume", "market_cap", "name"])
+        wcsv(f"{OUT}/snapshots/{snap_date}.csv", snap, ["ticker", "close", "chg_pct", "volume", "market_cap", "name"])
         keep = sorted(os.listdir(f"{OUT}/snapshots"))[-40:]
         for fn in os.listdir(f"{OUT}/snapshots"):
             if fn not in keep:
                 os.remove(f"{OUT}/snapshots/{fn}")
 
     status.update({"generated_at_kst": datetime.now(KST).strftime("%Y-%m-%d %H:%M"), "base_trading_date_et": base_date,
-                   "tickers_requested": len(tickers), "tickers_ok": len(hist), "snapshot_rows": len(snap),
+                   "tickers_requested": len(tickers), "tickers_ok": len(hist), "snapshot_rows": len(snap), "snapshot_date": snap_date,
                    "stale_tickers": [m["ticker"] for m in ms if m["stale"]][:50]})
     json.dump(status, open(f"{OUT}/status.json", "w"), ensure_ascii=False, indent=1)
     print(json.dumps({k: v for k, v in status.items() if k != "missing"}, ensure_ascii=False))
