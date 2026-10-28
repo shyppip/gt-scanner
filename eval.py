@@ -101,6 +101,7 @@ def main():
             cols.append(c)
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     stats = {}
+    seen = set()   # 주말에 같은 후보·같은 기준일이 여러 번 실린 경우 통계에는 한 번만
 
     for r in rows:
         t = (r.get("ticker") or "").strip().upper()
@@ -141,6 +142,10 @@ def main():
             r.update({k + "date": d, k + "price": round(p, 4), k + "return_pct": round(rr, 2), k + "spy_return_pct": round(sr, 2),
                       k + "excess_return_pct": round(rr - sr, 2), k + "status": "complete"})
             x = -(rr - sr) if short else rr - sr
+            key = (t, days[i0], n)
+            if key in seen:
+                continue
+            seen.add(key)
             stats.setdefault((g, n), []).append(x)
             stats.setdefault(("전체", n), []).append(x)
         r["last_updated_kst"] = now
@@ -165,7 +170,7 @@ def main():
             if v:
                 hit = sum(1 for x in v if x > 0) / len(v) * 100
                 L.append(f"| {g} | D+{n} | {len(v)} | {hit:.0f}% | {st.mean(v):+.2f} | {st.median(v):+.2f} |")
-    L += ["", "적중 = SPY 대비 초과수익 > 0 (피해 가능 종목은 반대로 SPY보다 덜 오르면 적중, 값의 부호도 뒤집어 집계).",
+    L += ["", "같은 종목·같은 기준일로 여러 날 실린 후보(주말 보고서 등)는 통계에 한 번만 셌다.", "적중 = SPY 대비 초과수익 > 0 (피해 가능 종목은 반대로 SPY보다 덜 오르면 적중, 값의 부호도 뒤집어 집계).",
           "표본 5개 미만 그룹은 우연일 가능성이 큼 — 판단 근거로 쓰지 말 것."]
     open(a.report, "w", encoding="utf-8").write("\n".join(L) + "\n")
     print("\n".join(L))
