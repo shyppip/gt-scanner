@@ -63,6 +63,7 @@ def load_groups(paths):
         cols = rows[0].keys()
         tc = next((c for c in cols if c.lower() in ("ticker", "symbol", "티커")), None)
         gc = next((c for c in cols if "theme_group" in c.lower()), None)
+        rc = next((c for c in cols if c.lower() == "role"), None)
         dc = next((c for c in cols if "date" in c.lower()), None)
         if not (tc and gc):
             continue
@@ -72,8 +73,9 @@ def load_groups(paths):
             for t in re.split(r"[ ,/;|]+", r[tc] or ""):
                 t = t.strip().upper()
                 if t and r[gc]:
-                    g[(d or fd, t)] = r[gc].strip()
-                    g.setdefault((None, t), r[gc].strip())
+                    role = (r.get(rc) or "").strip() if rc else ""
+                    g[(d or fd, t)] = (r[gc].strip(), role)
+                    g.setdefault((None, t), (r[gc].strip(), role))
     return g
 
 
@@ -107,8 +109,10 @@ def main():
         if not bd and sel:
             bd = (datetime.strptime(sel, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
         prior = [d for d in days if bd and d <= bd]
-        g = r.get("theme_group") or groups.get((sel, t)) or groups.get((None, t)) or r.get("theme") or "미분류"
+        gm = groups.get((sel, t)) or groups.get((None, t)) or ("", "")
+        g = r.get("theme_group") or gm[0] or r.get("theme") or "미분류"
         r["theme_group"] = g
+        short = "피해" in (r.get("role") or gm[1] or "")   # 피해 가능 종목은 SPY보다 못 가야 적중
         if not prior:
             for n in H:
                 r[f"evaluation_{n}d_status"] = "no_baseline_date"
@@ -136,8 +140,9 @@ def main():
             rr, sr = (p / base - 1) * 100, (sp / sbase - 1) * 100
             r.update({k + "date": d, k + "price": round(p, 4), k + "return_pct": round(rr, 2), k + "spy_return_pct": round(sr, 2),
                       k + "excess_return_pct": round(rr - sr, 2), k + "status": "complete"})
-            stats.setdefault((g, n), []).append(rr - sr)
-            stats.setdefault(("전체", n), []).append(rr - sr)
+            x = -(rr - sr) if short else rr - sr
+            stats.setdefault((g, n), []).append(x)
+            stats.setdefault(("전체", n), []).append(x)
         r["last_updated_kst"] = now
 
     with open(a.out, "w", newline="", encoding="utf-8-sig") as fh:
@@ -152,7 +157,7 @@ def main():
             cnt[(n, s)] = cnt.get((n, s), 0) + 1
     L = [f"# 후보 자동 채점 ({now}, 가격 기준 마지막 거래일 {days[-1]})", "",
          "상태: " + " · ".join(f"D+{n} " + ", ".join(f"{s} {c}" for (m, s), c in sorted(cnt.items()) if m == n) for n in H), "",
-         "| 테마 그룹 | 기간 | 표본 | 적중률(SPY 초과>0) | 평균 초과(%p) | 중앙값(%p) |", "|---|---|---|---|---|---|"]
+         "| 테마 그룹 | 기간 | 표본 | 적중률 | 평균 방향 초과(%p) | 중앙값(%p) |", "|---|---|---|---|---|---|"]
     order = sorted({g for g, _ in stats}, key=lambda g: (g != "전체", g))
     for g in order:
         for n in H:
@@ -160,7 +165,8 @@ def main():
             if v:
                 hit = sum(1 for x in v if x > 0) / len(v) * 100
                 L.append(f"| {g} | D+{n} | {len(v)} | {hit:.0f}% | {st.mean(v):+.2f} | {st.median(v):+.2f} |")
-    L += ["", "표본 5개 미만 그룹은 우연일 가능성이 큼 — 판단 근거로 쓰지 말 것."]
+    L += ["", "적중 = SPY 대비 초과수익 > 0 (피해 가능 종목은 반대로 SPY보다 덜 오르면 적중, 값의 부호도 뒤집어 집계).",
+          "표본 5개 미만 그룹은 우연일 가능성이 큼 — 판단 근거로 쓰지 말 것."]
     open(a.report, "w", encoding="utf-8").write("\n".join(L) + "\n")
     print("\n".join(L))
 
