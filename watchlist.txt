@@ -1,0 +1,8 @@
+# 일일 미증시 보고 후보 원장 종목 (S&P500·나스닥100·핵심 ETF는 자동 포함, 그 밖의 종목만 적으면 됨)
+SMCI
+SPCX
+CLS
+CRWD
+KEY
+COF
+CCI
