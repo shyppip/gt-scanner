@@ -1,0 +1,15 @@
+item,date,value,prev_date,prev_value,change,unit,source
+US2Y,2026-10-30,4.56,2026-10-29,4.61,-5.0,% (change=bp),US Treasury Par Yield Curve
+US10Y,2026-10-30,4.94,2026-10-29,4.98,-4.0,% (change=bp),US Treasury Par Yield Curve
+US30Y,2026-10-30,5.31,2026-10-29,5.32,-1.0,% (change=bp),US Treasury Par Yield Curve
+US3M,2026-10-30,4.16,2026-10-29,4.18,-2.0,% (change=bp),US Treasury Par Yield Curve
+US2s10s,2026-10-30,0.38,2026-10-29,0.37,,%p,US Treasury
+US10Y_REAL,2026-10-30,2.6,2026-10-29,2.63,-3.0,% (change=bp),US Treasury Par Real Yield Curve
+DXY,2026-10-29,102.04,2026-10-28,102.19,-0.15,level (change=%),Yahoo Finance DX-Y.NYB
+VIX,2026-10-30,19.42,2026-10-29,17.2,12.91,level (change=%),Yahoo Finance ^VIX
+MOVE,2026-10-30,100.1976,2026-10-29,93.54,7.12,level (change=%),Yahoo Finance ^MOVE
+WTI,2026-10-29,102.0,2026-10-28,102.78,-0.76,level (change=%),Yahoo Finance CL=F
+BRENT,2026-10-29,114.88,2026-10-28,115.32,-0.38,level (change=%),Yahoo Finance BZ=F
+GOLD,2026-10-29,4031.3999,2026-10-28,4051.6001,-0.5,level (change=%),Yahoo Finance GC=F
+US10Y_YAHOO,2026-10-30,4.929,2026-10-29,4.989,-1.2,level (change=%),Yahoo Finance ^TNX
+US30Y_YAHOO,2026-10-30,5.309,2026-10-29,5.329,-0.38,level (change=%),Yahoo Finance ^TYX
