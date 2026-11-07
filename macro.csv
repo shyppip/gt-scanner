@@ -1,0 +1,15 @@
+item,date,value,prev_date,prev_value,change,unit,source
+US2Y,2026-11-06,4.51,2026-11-05,4.46,5.0,% (change=bp),US Treasury Par Yield Curve
+US10Y,2026-11-06,4.86,2026-11-05,4.84,2.0,% (change=bp),US Treasury Par Yield Curve
+US30Y,2026-11-06,5.26,2026-11-05,5.25,1.0,% (change=bp),US Treasury Par Yield Curve
+US3M,2026-11-06,4.19,2026-11-05,4.17,2.0,% (change=bp),US Treasury Par Yield Curve
+US2s10s,2026-11-06,0.35,2026-11-05,0.38,,%p,US Treasury
+US10Y_REAL,2026-11-06,2.63,2026-11-05,2.6,3.0,% (change=bp),US Treasury Par Real Yield Curve
+DXY,2026-11-05,101.55,2026-11-04,101.51,0.04,level (change=%),Yahoo Finance DX-Y.NYB
+VIX,2026-11-06,25.64,2026-11-05,28.18,-9.01,level (change=%),Yahoo Finance ^VIX
+MOVE,2026-11-06,92.7721,2026-11-05,97.92,-5.26,level (change=%),Yahoo Finance ^MOVE
+WTI,2026-11-05,90.52,2026-11-04,88.12,2.72,level (change=%),Yahoo Finance CL=F
+BRENT,2026-11-05,98.29,2026-11-04,94.62,3.88,level (change=%),Yahoo Finance BZ=F
+GOLD,2026-11-05,4113.5,2026-11-04,4073.0,0.99,level (change=%),Yahoo Finance GC=F
+US10Y_YAHOO,2026-11-06,4.859,2026-11-05,4.837,0.45,level (change=%),Yahoo Finance ^TNX
+US30Y_YAHOO,2026-11-06,5.26,2026-11-05,5.251,0.17,level (change=%),Yahoo Finance ^TYX
