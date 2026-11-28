@@ -1,0 +1,27 @@
+{
+ "ok": {
+  "sp500_list": 1,
+  "ndx_list": 1,
+  "yahoo": 559,
+  "treasury_nominal": 1,
+  "treasury_real": 1,
+  "macro_yahoo": 8,
+  "nasdaq_snapshot": 1
+ },
+ "fail": {},
+ "missing": [],
+ "snapshot_vote": {
+  "2026-11-25": 232,
+  "2026-11-24": 4,
+  "2026-11-27": 3
+ },
+ "generated_at_kst": "2026-11-28 13:19",
+ "base_trading_date_et": "2026-11-27",
+ "tickers_requested": 559,
+ "tickers_ok": 559,
+ "snapshot_rows": 7372,
+ "snapshot_date": "2026-11-25",
+ "stale_tickers": [
+  "SNDK"
+ ]
+}
